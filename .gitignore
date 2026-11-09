@@ -1,0 +1,121 @@
+# FinPath local and upload exclusions.
+# Keep source, tests, migrations, Dockerfiles, documentation, and safe example
+# templates. Never commit local secrets, runtime data, caches, or generated files.
+
+# ---------------------------------------------------------------------------
+# Environment files and local secrets
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+!.env.docker.example
+
+# Local runtime data, including development email outbox messages and tokens.
+backend/var/
+**/email_outbox/
+
+# Credential and secret files
+*.pem
+*.key
+*.crt
+*.cer
+*.der
+*.p12
+*.pfx
+*.jks
+*.csr
+*.secret
+*.credentials
+id_rsa*
+id_ed25519*
+.ssh/
+.aws/
+.azure/
+.gcloud/
+.netrc
+.pgpass
+.npmrc
+.pypirc
+.docker/
+
+# ---------------------------------------------------------------------------
+# Python environments, caches, and test/build output
+# ---------------------------------------------------------------------------
+.venv/
+venv/
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.hypothesis/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+**/coverage/
+**/build/
+backend/finpath_backend.egg-info/
+*.egg-info/
+*.tsbuildinfo
+
+# ---------------------------------------------------------------------------
+# Node dependencies and frontend build output
+# ---------------------------------------------------------------------------
+node_modules/
+frontend/node_modules/
+frontend/dist/
+dist-ssr/
+*.local
+
+# Playwright browser E2E artifacts (screenshots, traces, videos, reports)
+frontend/test-results/
+frontend/playwright-report/
+frontend/blob-report/
+frontend/playwright/.cache/
+
+# ---------------------------------------------------------------------------
+# Local databases, backups, dumps, archives, and logs
+# ---------------------------------------------------------------------------
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-wal
+*.db-shm
+*.dump
+*.bak
+*.backup
+*.sql
+*.sql.gz
+*.sql.bz2
+*.sql.xz
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.log
+logs/
+
+# ---------------------------------------------------------------------------
+# IDE, editor, and operating-system artifacts
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+.history/
+.cache/
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+*.tmp
+*.temp
+*.orig
+*.rej

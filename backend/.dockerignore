@@ -1,0 +1,70 @@
+# Docker build context exclusions for the FinPath backend.
+# The build context is ./backend. Keep required application, migration, and
+# startup files; exclude local secrets, caches, tests, and runtime data.
+
+# Python virtual environments and caches
+.venv
+**/.venv/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.coverage
+**/.coverage.*
+**/coverage/
+**/coverage.xml
+**/htmlcov/
+
+# Local secrets and environment files
+.env
+**/.env
+.env.*
+**/.env.*
+!.env.example
+
+# Test data and local runtime data
+tests
+**/tests/
+var
+**/var/
+
+# Version control metadata
+.git
+**/.git/
+.gitignore
+
+# Python packaging metadata
+finpath_backend.egg-info
+**/*.egg-info/
+
+# Private keys and certificates
+**/*.pem
+**/*.key
+**/*.crt
+**/*.p12
+**/*.pfx
+**/*.jks
+**/.ssh/
+**/.aws/
+
+# Local database files, dumps, backups, and archives.
+# Alembic migrations are Python; SQL files in this context are local dumps.
+**/*.sqlite
+**/*.sqlite3
+**/*.db
+**/*.dump
+**/*.bak
+**/*.backup
+**/*.sql
+**/*.sql.gz
+**/*.sql.bz2
+**/*.sql.xz
+**/*.tar
+**/*.tar.gz
+**/*.tgz
+**/*.zip
+
+# Logs and editor/OS artifacts
+**/*.log
+**/.DS_Store

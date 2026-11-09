@@ -1,0 +1,66 @@
+import { isApiError } from './errors'
+
+/**
+ * Errors that may indicate a backend cold start or a temporary edge failure.
+ * They are only retried for safe, idempotent requests such as `GET`.
+ */
+const COLD_START_STATUSES = new Set([502, 503, 504])
+
+export function isColdStartFailure(error: unknown): boolean {
+  if (!isApiError(error)) return false
+  if (error.status === null) return true
+  return COLD_START_STATUSES.has(error.status)
+}
+
+export type SafeRetryOptions = {
+  attempts?: number
+  delaysMs?: readonly number[]
+  sleep?: (delayMs: number) => Promise<void>
+}
+
+function sleepWithTimeout(delayMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, delayMs)
+  })
+}
+
+/**
+ * Retry a request that is safe to repeat, such as `GET /auth/csrf`.
+ *
+ * Only network failures and 502/503/504 responses are retried. Authentication
+ * failures (401/403), validation errors, and conflicts are returned
+ * immediately. This helper must never be used for refresh-token POST requests,
+ * because a lost refresh response may already have rotated the refresh token.
+ */
+export async function retrySafeRequest<T>(
+  operation: () => Promise<T>,
+  {
+    attempts = 3,
+    delaysMs = [250, 750],
+    sleep = sleepWithTimeout,
+  }: SafeRetryOptions = {},
+): Promise<T> {
+  if (!Number.isInteger(attempts) || attempts < 1) {
+    throw new Error('Safe retry attempts must be a positive integer.')
+  }
+
+  let lastError: unknown
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await operation()
+    } catch (error) {
+      lastError = error
+      if (!isColdStartFailure(error) || attempt === attempts - 1) {
+        throw error
+      }
+
+      const delay = delaysMs[Math.min(attempt, delaysMs.length - 1)] ?? 0
+      if (delay > 0) {
+        await sleep(delay)
+      }
+    }
+  }
+
+  throw lastError
+}

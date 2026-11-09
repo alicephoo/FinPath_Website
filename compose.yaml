@@ -1,0 +1,79 @@
+name: finpath
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-finpath}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the project-root .env file}
+      FINPATH_DB_PASSWORD: ${FINPATH_DB_PASSWORD:?Set FINPATH_DB_PASSWORD in the project-root .env file}
+      FINPATH_MIGRATION_DB_PASSWORD: ${FINPATH_MIGRATION_DB_PASSWORD:?Set FINPATH_MIGRATION_DB_PASSWORD in the project-root .env file}
+      FINPATH_REGISTRATION_DB_PASSWORD: ${FINPATH_REGISTRATION_DB_PASSWORD:?Set FINPATH_REGISTRATION_DB_PASSWORD in the project-root .env file}
+    volumes:
+      - finpath_postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sh:/docker-entrypoint-initdb.d/10-finpath-roles.sh:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}" &&
+          psql -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}" -tAc
+          "SELECT 1 FROM pg_roles WHERE rolname='finpath_app'" | grep -q 1
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
+
+  backend:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      FINPATH_ENVIRONMENT: ${FINPATH_ENVIRONMENT:-development}
+      FINPATH_REQUIRE_EMAIL_VERIFICATION: ${FINPATH_REQUIRE_EMAIL_VERIFICATION:-false}
+      FINPATH_FRONTEND_ORIGINS: ${FINPATH_FRONTEND_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${FINPATH_BACKEND_PORT:-8000}:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000/api/v1}
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FINPATH_FRONTEND_PORT:-8080}:80"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O /dev/null http://127.0.0.1/ || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+volumes:
+  finpath_postgres_data:
+    name: finpath_postgres_data
