@@ -3,7 +3,24 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from '../App'
 import { apiClient } from '../api/client'
+import { SAFE_RETRY_ATTEMPTS } from '../api/retry'
 import { AuthProvider, useAuth } from './AuthContext'
+
+// The retry budget now spans about 15 seconds in production. Tests exercise
+// the same attempt count and failure classification without waiting for it.
+vi.mock('../api/retry', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../api/retry')>()
+  return {
+    ...actual,
+    retrySafeRequest: (
+      operation: () => Promise<unknown>,
+      options: Parameters<typeof actual.retrySafeRequest>[1] = {},
+    ) => actual.retrySafeRequest(operation, {
+      ...options,
+      sleep: async () => {},
+    }),
+  }
+})
 
 const fetchMock = vi.fn<typeof fetch>()
 
@@ -424,9 +441,13 @@ describe('session restoration', () => {
       { name: 'Session restore paused' },
       { timeout: 3000 },
     )
-    expect(callsFor('GET', '/api/v1/auth/csrf')).toHaveLength(3)
+    expect(callsFor('GET', '/api/v1/auth/csrf')).toHaveLength(
+      SAFE_RETRY_ATTEMPTS,
+    )
     expect(callsFor('POST', '/api/v1/auth/refresh')).toHaveLength(0)
     expect(screen.queryByRole('tablist')).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Sign in to FinPath' }))
+      .not.toBeInTheDocument()
 
     mockAuthenticatedRestore()
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
@@ -496,6 +517,322 @@ describe('session restoration', () => {
     await screen.findByRole('tablist', {}, { timeout: 3000 })
     expect(callsFor('POST', '/api/v1/auth/refresh')).toHaveLength(1)
     expect(callsFor('GET', '/api/v1/auth/me')).toHaveLength(2)
+  })
+
+  it('recovers when the backend becomes available partway through the CSRF retry budget', async () => {
+    let csrfAttempts = 0
+    route('GET', '/api/v1/auth/csrf', () => {
+      csrfAttempts += 1
+      if (csrfAttempts < 4) {
+        return errorResponse(
+          503,
+          'proxy_upstream_unavailable',
+          'The API backend is temporarily unavailable.',
+        )
+      }
+      return jsonResponse({ data: { csrf_token: 'csrf-start' } })
+    })
+    route('POST', '/api/v1/auth/refresh', () => jsonResponse(loginBody()))
+    route('GET', '/api/v1/auth/me', () => jsonResponse({ data: testUser }))
+
+    render(<App />)
+
+    await screen.findByRole('tablist', {}, { timeout: 3000 })
+    expect(callsFor('GET', '/api/v1/auth/csrf')).toHaveLength(4)
+    expect(callsFor('POST', '/api/v1/auth/refresh')).toHaveLength(1)
+    expect(callsFor('GET', '/api/v1/auth/me')).toHaveLength(1)
+  })
+
+  it('keeps the rotated session when only the profile GET is unavailable and retries without a second refresh', async () => {
+    let meAttempts = 0
+    route('GET', '/api/v1/auth/csrf', () => jsonResponse({
+      data: { csrf_token: 'csrf-start' },
+    }))
+    route('POST', '/api/v1/auth/refresh', () => jsonResponse(loginBody()))
+    route('GET', '/api/v1/auth/me', () => {
+      meAttempts += 1
+      if (meAttempts <= SAFE_RETRY_ATTEMPTS) {
+        return errorResponse(
+          503,
+          'database_unavailable',
+          'The database is temporarily unavailable.',
+        )
+      }
+      return jsonResponse({ data: testUser })
+    })
+
+    render(<App />)
+
+    await screen.findByRole(
+      'heading',
+      { name: 'Session restore paused' },
+      { timeout: 3000 },
+    )
+    expect(callsFor('POST', '/api/v1/auth/refresh')).toHaveLength(1)
+    expect(callsFor('GET', '/api/v1/auth/me')).toHaveLength(
+      SAFE_RETRY_ATTEMPTS,
+    )
+    expect(screen.queryByRole('heading', { name: 'Sign in to FinPath' }))
+      .not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+
+    await screen.findByRole('tablist', {}, { timeout: 3000 })
+
+    // The retry reused the session the server already rotated instead of
+    // refreshing (and rotating) the token a second time.
+    expect(callsFor('POST', '/api/v1/auth/refresh')).toHaveLength(1)
+    expect(callsFor('GET', '/api/v1/auth/me')).toHaveLength(
+      SAFE_RETRY_ATTEMPTS + 1,
+    )
+    expect(callsFor('POST', '/api/v1/auth/logout')).toHaveLength(0)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+
+  it('falls back to a fresh CSRF and refresh when the reused access token is rejected', async () => {
+    let csrfCalls = 0
+    let refreshCalls = 0
+    let meAttempts = 0
+
+    route('GET', '/api/v1/auth/csrf', () => {
+      csrfCalls += 1
+      return jsonResponse({ data: { csrf_token: `csrf-start-${csrfCalls}` } })
+    })
+    route('POST', '/api/v1/auth/refresh', () => {
+      refreshCalls += 1
+      return jsonResponse(loginBody(
+        refreshCalls === 1 ? 'access-token-1' : 'access-token-2',
+        refreshCalls === 1 ? 'csrf-session-1' : 'csrf-session-2',
+      ))
+    })
+    route('GET', '/api/v1/auth/me', (init) => {
+      meAttempts += 1
+      if (meAttempts <= SAFE_RETRY_ATTEMPTS) {
+        return errorResponse(
+          503,
+          'database_unavailable',
+          'The database is temporarily unavailable.',
+        )
+      }
+      const authorization = new Headers(init.headers).get('Authorization')
+      if (authorization === 'Bearer access-token-1') {
+        return errorResponse(
+          401,
+          'authentication_required',
+          'Authentication is required.',
+        )
+      }
+      return jsonResponse({ data: testUser })
+    })
+
+    render(<App />)
+
+    await screen.findByRole(
+      'heading',
+      { name: 'Session restore paused' },
+      { timeout: 3000 },
+    )
+    expect(csrfCalls).toBe(1)
+    expect(refreshCalls).toBe(1)
+    expect(meAttempts).toBe(SAFE_RETRY_ATTEMPTS)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+
+    await screen.findByRole('tablist', {}, { timeout: 3000 })
+
+    // The retained token was rejected, so restoration restarted from CSRF and
+    // performed exactly one new refresh using the current cookie.
+    expect(csrfCalls).toBe(2)
+    expect(refreshCalls).toBe(2)
+    expect(meAttempts).toBe(SAFE_RETRY_ATTEMPTS + 2)
+    const refreshCallsList = callsFor('POST', '/api/v1/auth/refresh')
+    expect(headersFor(refreshCallsList[0]).get('X-CSRF-Token'))
+      .toBe('csrf-start-1')
+    expect(headersFor(refreshCallsList[1]).get('X-CSRF-Token'))
+      .toBe('csrf-start-2')
+  })
+
+  it.each([
+    [401, 'authentication_required'],
+    [403, 'csrf_invalid'],
+  ] as const)(
+    'clears the session and becomes anonymous when a background refresh returns %i',
+    async (status, code) => {
+      mockAuthenticatedRestore()
+      let refreshCalls = 0
+      route('POST', '/api/v1/auth/refresh', () => {
+        refreshCalls += 1
+        if (refreshCalls === 1) {
+          return jsonResponse(loginBody('access-token-1', 'csrf-session-1'))
+        }
+        if (refreshCalls === 2) {
+          return errorResponse(status, code, 'The session is no longer valid.')
+        }
+        return jsonResponse(loginBody('access-token-3', 'csrf-session-3'))
+      })
+
+      function SessionProbe() {
+        const { status: authStatus, refresh } = useAuth()
+        const [message, setMessage] = useState('')
+
+        async function runRefresh() {
+          try {
+            await refresh()
+            setMessage('refresh succeeded')
+          } catch {
+            setMessage('refresh failed')
+          }
+        }
+
+        return (
+          <>
+            <p>status: {authStatus}</p>
+            <button type="button" onClick={() => { void runRefresh() }}>
+              Refresh now
+            </button>
+            <p>{message}</p>
+          </>
+        )
+      }
+
+      render(
+        <AuthProvider>
+          <SessionProbe />
+        </AuthProvider>,
+      )
+
+      await screen.findByText('status: authenticated')
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh now' }))
+      await screen.findByText('status: anonymous')
+      expect(screen.getByText('refresh failed')).toBeInTheDocument()
+
+      // A retained session would reuse its CSRF token. A cleared session must
+      // fetch a fresh one before the next refresh attempt.
+      expect(callsFor('GET', '/api/v1/auth/csrf')).toHaveLength(1)
+
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh now' }))
+      await screen.findByText('status: authenticated')
+      expect(callsFor('GET', '/api/v1/auth/csrf')).toHaveLength(2)
+      expect(callsFor('POST', '/api/v1/auth/refresh')).toHaveLength(3)
+      expect(callsFor('POST', '/api/v1/auth/logout')).toHaveLength(0)
+    },
+  )
+
+  it('does not retain a session when the profile request fails with a non-transient error', async () => {
+    let csrfCalls = 0
+    route('GET', '/api/v1/auth/csrf', () => {
+      csrfCalls += 1
+      return jsonResponse({ data: { csrf_token: `csrf-start-${csrfCalls}` } })
+    })
+    route('POST', '/api/v1/auth/refresh', () => jsonResponse(
+      loginBody('access-token-1', 'csrf-session-1'),
+    ))
+    route('GET', '/api/v1/auth/me', () => errorResponse(
+      500,
+      'internal_error',
+      'An unexpected server error occurred.',
+    ))
+
+    function RestoreProbe() {
+      const { status, refresh } = useAuth()
+      const [message, setMessage] = useState('')
+
+      async function runRefresh() {
+        try {
+          await refresh()
+          setMessage('refresh succeeded')
+        } catch {
+          setMessage('refresh failed')
+        }
+      }
+
+      return (
+        <>
+          <p>status: {status}</p>
+          <button type="button" onClick={() => { void runRefresh() }}>
+            Refresh now
+          </button>
+          <p>{message}</p>
+        </>
+      )
+    }
+
+    render(
+      <AuthProvider>
+        <RestoreProbe />
+      </AuthProvider>,
+    )
+
+    await screen.findByText('status: anonymous')
+    expect(screen.queryByRole('heading', { name: 'Session restore paused' }))
+      .not.toBeInTheDocument()
+    expect(csrfCalls).toBe(1)
+
+    // A retained session would skip the CSRF GET and reuse its stored token.
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh now' }))
+    await screen.findByText('status: authenticated')
+    expect(csrfCalls).toBe(2)
+    expect(callsFor('POST', '/api/v1/auth/refresh')).toHaveLength(2)
+  })
+
+  it('keeps the authenticated state when a background refresh is temporarily unavailable', async () => {
+    mockAuthenticatedRestore()
+    let refreshCalls = 0
+    route('POST', '/api/v1/auth/refresh', () => {
+      refreshCalls += 1
+      if (refreshCalls === 1) {
+        return jsonResponse(loginBody())
+      }
+      return errorResponse(
+        503,
+        'database_unavailable',
+        'The database is temporarily unavailable.',
+      )
+    })
+
+    function RefreshProbe() {
+      const { status, refresh } = useAuth()
+      const [result, setResult] = useState('')
+
+      if (status !== 'authenticated') {
+        return <p>status: {status}</p>
+      }
+
+      async function runRefresh() {
+        try {
+          await refresh()
+          setResult('refresh succeeded')
+        } catch {
+          setResult('refresh failed')
+        }
+      }
+
+      return (
+        <>
+          <p>session ready</p>
+          <button type="button" onClick={() => { void runRefresh() }}>
+            Refresh now
+          </button>
+          <p>{result}</p>
+        </>
+      )
+    }
+
+    render(
+      <AuthProvider>
+        <RefreshProbe />
+      </AuthProvider>,
+    )
+
+    await screen.findByText('session ready')
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh now' }))
+    await screen.findByText('refresh failed')
+
+    // A temporary 503 must not clear the session or show the login screen.
+    expect(screen.getByText('session ready')).toBeInTheDocument()
+    expect(screen.queryByText('status: anonymous')).not.toBeInTheDocument()
+    expect(callsFor('POST', '/api/v1/auth/refresh')).toHaveLength(2)
   })
 
   it('refreshes once after a 401 and retries without a refresh loop', async () => {

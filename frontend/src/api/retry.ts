@@ -12,6 +12,17 @@ export function isColdStartFailure(error: unknown): boolean {
   return COLD_START_STATUSES.has(error.status)
 }
 
+/**
+ * The default budget for safe GET retries.
+ *
+ * A Render Free instance can take tens of seconds to wake from inactivity, so
+ * the previous 250 ms + 750 ms budget was exhausted long before the backend was
+ * able to answer. These delays keep the total wait bounded at roughly 15 s
+ * while giving the instance enough time to start.
+ */
+export const SAFE_RETRY_ATTEMPTS = 5
+export const SAFE_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000] as const
+
 export type SafeRetryOptions = {
   attempts?: number
   delaysMs?: readonly number[]
@@ -35,8 +46,8 @@ function sleepWithTimeout(delayMs: number): Promise<void> {
 export async function retrySafeRequest<T>(
   operation: () => Promise<T>,
   {
-    attempts = 3,
-    delaysMs = [250, 750],
+    attempts = SAFE_RETRY_ATTEMPTS,
+    delaysMs = SAFE_RETRY_DELAYS_MS,
     sleep = sleepWithTimeout,
   }: SafeRetryOptions = {},
 ): Promise<T> {

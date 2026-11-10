@@ -703,6 +703,205 @@ describe('DashboardReports starting balance saves', () => {
     expect(document.querySelector('.account-balance-form')).toBeInTheDocument()
   })
 
+  it('resyncs after a 412 and retries with the new ETag', async () => {
+    await renderLoaded()
+
+    const updated = settingsFixture({
+      starting_balance_kyat: 1_234_567,
+      effective_date: '2026-11-05',
+      amount_kyat: 1_234_567,
+    })
+
+    mocks.updateFinancialSettings
+      .mockRejectedValueOnce(new ApiError({
+        status: 412,
+        code: 'stale_revision',
+        message: 'The settings revision is not current.',
+      }))
+      .mockResolvedValueOnce({ settings: updated, etag: '"5"' })
+    mocks.fetchFinancialSettings
+      .mockResolvedValueOnce({ settings: settingsFixture(), etag: '"4"' })
+      .mockResolvedValueOnce({ settings: updated, etag: '"5"' })
+    mocks.fetchDashboardOverview.mockResolvedValueOnce(overviewFixture({
+      account_balance: balanceFixture({
+        starting_balance_kyat: 1_234_567,
+        effective_date: '2026-11-05',
+        amount_kyat: 1_234_567,
+      }),
+    }))
+
+    const form = openEditForm()
+    fillBalanceForm(form, '1234567', '2026-11-05')
+    fireEvent.click(within(form).getByRole('button', {
+      name: 'Save starting balance',
+    }))
+
+    expect(await screen.findByText(/changed elsewhere/)).toBeInTheDocument()
+    expect(within(form).getByLabelText(/Starting bank balance/))
+      .toHaveValue(1_234_567)
+    expect(within(form).getByLabelText(/Effective date/))
+      .toHaveValue('2026-11-05')
+
+    fireEvent.click(within(form).getByRole('button', {
+      name: 'Save starting balance',
+    }))
+
+    await waitFor(() => {
+      expect(mocks.updateFinancialSettings).toHaveBeenCalledTimes(2)
+    })
+    expect(mocks.updateFinancialSettings).toHaveBeenNthCalledWith(
+      2,
+      'access-token-1',
+      {
+        starting_balance_kyat: 1_234_567,
+        effective_date: '2026-11-05',
+      },
+      '"4"',
+    )
+  })
+
+  it('keeps Save disabled while the conflict resync is running', async () => {
+    await renderLoaded()
+
+    mocks.updateFinancialSettings.mockRejectedValueOnce(new ApiError({
+      status: 412,
+      code: 'stale_revision',
+      message: 'The settings revision is not current.',
+    }))
+    const resync = deferred<{ settings: FinancialSettings; etag: string }>()
+    mocks.fetchFinancialSettings.mockReturnValueOnce(resync.promise)
+
+    const form = openEditForm()
+    fillBalanceForm(form, '1250000', '2026-11-04')
+    fireEvent.click(within(form).getByRole('button', {
+      name: 'Save starting balance',
+    }))
+
+    const busyButton = await within(form).findByRole('button', {
+      name: 'Saving…',
+    })
+    expect(busyButton).toBeDisabled()
+    expect(mocks.updateFinancialSettings).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(busyButton)
+    expect(mocks.updateFinancialSettings).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      resync.resolve({ settings: settingsFixture(), etag: '"4"' })
+    })
+
+    expect(await screen.findByText(/changed elsewhere/)).toBeInTheDocument()
+    expect(within(form).getByRole('button', { name: 'Save starting balance' }))
+      .not.toBeDisabled()
+    expect(mocks.updateFinancialSettings).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the typed amount and date after a conflict', async () => {
+    await renderLoaded()
+
+    mocks.updateFinancialSettings.mockRejectedValueOnce(new ApiError({
+      status: 412,
+      code: 'stale_revision',
+      message: 'The settings revision is not current.',
+    }))
+    mocks.fetchFinancialSettings.mockResolvedValueOnce({
+      settings: settingsFixture(),
+      etag: '"4"',
+    })
+
+    const form = openEditForm()
+    fillBalanceForm(form, '-75000', '2026-11-07')
+    fireEvent.click(within(form).getByRole('button', {
+      name: 'Save starting balance',
+    }))
+
+    expect(await screen.findByText(/changed elsewhere/)).toBeInTheDocument()
+    expect(within(form).getByLabelText(/Starting bank balance/))
+      .toHaveValue(-75_000)
+    expect(within(form).getByLabelText(/Effective date/))
+      .toHaveValue('2026-11-07')
+    expect(form).toBeInTheDocument()
+    expect(mocks.updateFinancialSettings).toHaveBeenCalledTimes(1)
+  })
+
+  it('reconciles a lost PUT response against the saved server values', async () => {
+    await renderLoaded()
+
+    const reconciled = settingsFixture({
+      starting_balance_kyat: 1_500_000,
+      effective_date: '2026-11-06',
+      amount_kyat: 1_500_000,
+    })
+
+    mocks.updateFinancialSettings.mockRejectedValueOnce(new ApiError({
+      status: null,
+      code: 'network_error',
+      message: 'Unable to reach the FinPath API. Check your connection and try again.',
+    }))
+    mocks.fetchFinancialSettings
+      .mockResolvedValueOnce({ settings: reconciled, etag: '"4"' })
+      .mockResolvedValueOnce({ settings: reconciled, etag: '"4"' })
+    mocks.fetchDashboardOverview.mockResolvedValueOnce(overviewFixture({
+      account_balance: balanceFixture({
+        starting_balance_kyat: 1_500_000,
+        effective_date: '2026-11-06',
+        amount_kyat: 1_500_000,
+      }),
+    }))
+
+    const form = openEditForm()
+    fillBalanceForm(form, '1500000', '2026-11-06')
+    fireEvent.click(within(form).getByRole('button', {
+      name: 'Save starting balance',
+    }))
+
+    expect(await screen.findByText(/was saved/)).toBeInTheDocument()
+    await waitFor(() => {
+      expect(mocks.fetchDashboardOverview).toHaveBeenCalledTimes(2)
+    })
+    expect(mocks.updateFinancialSettings).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(within(accountBalanceCard())
+      .getAllByText(formatMoney(1_500_000)).length).toBeGreaterThan(0)
+  })
+
+  it('refreshes the settings ETag even when the dashboard overview fails', async () => {
+    const view = render(<DashboardReports active={false} />)
+    await screen.findByRole('heading', { name: 'Calculated account balance' })
+
+    mocks.fetchFinancialSettings.mockResolvedValueOnce({
+      settings: settingsFixture(),
+      etag: '"7"',
+    })
+    mocks.fetchDashboardOverview.mockRejectedValueOnce(new ApiError({
+      status: 503,
+      code: 'database_unavailable',
+      message: 'The database is temporarily unavailable.',
+    }))
+
+    view.rerender(<DashboardReports active />)
+
+    expect(await screen.findByRole('alert'))
+      .toHaveTextContent('The database is temporarily unavailable.')
+
+    const form = openEditForm()
+    fillBalanceForm(form, '900000', '2026-11-02')
+    fireEvent.click(within(form).getByRole('button', {
+      name: 'Save starting balance',
+    }))
+
+    await waitFor(() => {
+      expect(mocks.updateFinancialSettings).toHaveBeenCalledWith(
+        'access-token-1',
+        {
+          starting_balance_kyat: 900_000,
+          effective_date: '2026-11-02',
+        },
+        '"7"',
+      )
+    })
+  })
+
   it('shows backend validation messages when a save fails', async () => {
     mocks.updateFinancialSettings.mockRejectedValue(new ApiError({
       status: 422,

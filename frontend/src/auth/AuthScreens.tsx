@@ -470,7 +470,7 @@ export function AuthScreens({
 }
 
 const RESTORE_UNAVAILABLE_MESSAGE =
-  'FinPath could not reach its server. It may be starting after a period of inactivity.'
+  'FinPath tried several times but could not reach its server. It may be starting after a period of inactivity.'
 
 export function SessionRestoreScreen({
   issue = null,
@@ -490,8 +490,7 @@ export function SessionRestoreScreen({
           <h1>Session restore paused</h1>
           <p>{RESTORE_UNAVAILABLE_MESSAGE}</p>
           <p>
-            Your saved sign-in has not been retried automatically. You can try
-            again safely.
+            Your saved sign-in has not been discarded. You can try again safely.
           </p>
           <button
             className="primary-button auth-submit"

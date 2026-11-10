@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import { ApiError } from './errors'
-import { isColdStartFailure, retrySafeRequest } from './retry'
+import {
+  isColdStartFailure,
+  retrySafeRequest,
+  SAFE_RETRY_ATTEMPTS,
+  SAFE_RETRY_DELAYS_MS,
+} from './retry'
 
 function apiError(status: number | null, code = 'http_error'): ApiError {
   return new ApiError({
@@ -42,7 +47,7 @@ describe('safe request retry', () => {
     expect(sleep).not.toHaveBeenCalled()
   })
 
-  it('retries 503 responses up to three attempts', async () => {
+  it('retries 503 responses with the bounded default budget', async () => {
     const operation = vi
       .fn<() => Promise<string>>()
       .mockRejectedValueOnce(apiError(503))
@@ -52,7 +57,27 @@ describe('safe request retry', () => {
 
     await expect(retrySafeRequest(operation, { sleep })).resolves.toBe('ok')
     expect(operation).toHaveBeenCalledTimes(3)
-    expect(sleep.mock.calls).toEqual([[250], [750]])
+    expect(sleep.mock.calls).toEqual([
+      [SAFE_RETRY_DELAYS_MS[0]],
+      [SAFE_RETRY_DELAYS_MS[1]],
+    ])
+  })
+
+  it('gives a waking backend the full bounded budget before failing', async () => {
+    const operation = vi.fn<() => Promise<string>>()
+      .mockRejectedValue(apiError(503))
+    const sleep = vi.fn(async () => {})
+
+    await expect(retrySafeRequest(operation, { sleep })).rejects.toMatchObject({
+      status: 503,
+    })
+    expect(operation).toHaveBeenCalledTimes(SAFE_RETRY_ATTEMPTS)
+    expect(sleep.mock.calls).toEqual(
+      SAFE_RETRY_DELAYS_MS.map((delay) => [delay]),
+    )
+    // The whole wait stays bounded rather than growing without limit.
+    expect(SAFE_RETRY_DELAYS_MS.reduce((sum, delay) => sum + delay, 0))
+      .toBe(15_000)
   })
 
   it('retries network failures', async () => {

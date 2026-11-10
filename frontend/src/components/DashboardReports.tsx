@@ -16,7 +16,9 @@ import {
   fetchFinancialSettings,
   updateFinancialSettings,
   type FinancialSettings,
+  type FinancialSettingsUpdate,
 } from '../api/financialSettings'
+import { isColdStartFailure } from '../api/retry'
 import { formatDateOnly, isValidDateOnly, localDateString } from '../data/dateOnly'
 import {
   formatMoney,
@@ -68,6 +70,14 @@ function savingsProgressPercent(actualKyat: number, targetKyat: number): number 
   return Math.min(100, Math.max(0, Math.round((actualKyat / targetKyat) * 100)))
 }
 
+function matchesIntendedSettings(
+  settings: FinancialSettings,
+  intended: FinancialSettingsUpdate,
+): boolean {
+  return settings.starting_balance_kyat === intended.starting_balance_kyat
+    && settings.effective_date === intended.effective_date
+}
+
 function DashboardReports({ active = true }: { active?: boolean }) {
   const { user, authorizedRequest } = useAuth()
   const [overview, setOverview] = useState<DashboardOverview | null>(null)
@@ -90,6 +100,7 @@ function DashboardReports({ active = true }: { active?: boolean }) {
   const [balanceError, setBalanceError] = useState('')
   const [balanceNotice, setBalanceNotice] = useState('')
   const settingsEtagRef = useRef<string | null>(null)
+  const savingRef = useRef(false)
   const hasLoadedRef = useRef(false)
   const wasActiveRef = useRef(active)
   const requestIdRef = useRef(0)
@@ -134,27 +145,69 @@ function DashboardReports({ active = true }: { active?: boolean }) {
 
     try {
       const result = await authorizedRequest(async (accessToken) => {
-        const [settingsResult, overviewResult] = await Promise.all([
+        const [settingsOutcome, overviewOutcome] = await Promise.allSettled([
           fetchFinancialSettings(accessToken),
           fetchDashboardOverview(accessToken),
         ])
-        return { settingsResult, overview: overviewResult }
+
+        // Let authorizedRequest's single refresh-and-retry handle an expired
+        // access token instead of silently treating a 401 as partial data.
+        if (
+          settingsOutcome.status === 'rejected'
+          && isApiError(settingsOutcome.reason)
+          && settingsOutcome.reason.status === 401
+        ) {
+          throw settingsOutcome.reason
+        }
+        if (
+          overviewOutcome.status === 'rejected'
+          && isApiError(overviewOutcome.reason)
+          && overviewOutcome.reason.status === 401
+        ) {
+          throw overviewOutcome.reason
+        }
+
+        return { settingsOutcome, overviewOutcome }
       })
 
       if (!mountedRef.current || requestId !== requestIdRef.current) return
 
-      setSettings(result.settingsResult.settings)
-      settingsEtagRef.current = result.settingsResult.etag
-      setOverview(result.overview)
-
       const firstLoad = !hasLoadedRef.current
-      if (firstLoad || options.resetForm) {
-        applySettingsToForm(
-          result.settingsResult.settings,
-          options.keepFormOpen,
-        )
+      let firstError: unknown = null
+
+      // Apply the settings and their ETag as soon as they are available. A
+      // failing overview request must not prevent the revision from being
+      // refreshed, otherwise a 412 recovery would keep resending a stale ETag.
+      if (result.settingsOutcome.status === 'fulfilled') {
+        const settingsResult = result.settingsOutcome.value
+        setSettings(settingsResult.settings)
+        settingsEtagRef.current = settingsResult.etag
+        if (firstLoad || options.resetForm) {
+          applySettingsToForm(
+            settingsResult.settings,
+            options.keepFormOpen,
+          )
+        }
+      } else {
+        firstError = result.settingsOutcome.reason
       }
-      hasLoadedRef.current = true
+
+      if (result.overviewOutcome.status === 'fulfilled') {
+        setOverview(result.overviewOutcome.value)
+      } else if (firstError === null) {
+        firstError = result.overviewOutcome.reason
+      }
+
+      if (
+        result.settingsOutcome.status === 'fulfilled'
+        || result.overviewOutcome.status === 'fulfilled'
+      ) {
+        hasLoadedRef.current = true
+      }
+
+      if (firstError !== null) {
+        setLoadError(describeLoadError(firstError))
+      }
     } catch (error) {
       if (!mountedRef.current || requestId !== requestIdRef.current) return
       setLoadError(describeLoadError(error))
@@ -248,31 +301,82 @@ function DashboardReports({ active = true }: { active?: boolean }) {
     setBalanceNotice('')
   }
 
+  /**
+   * Read the current settings and revision without touching the form, the
+   * dashboard overview, or any in-progress user input. Used to recover from a
+   * conflict or an ambiguous save result.
+   */
+  async function resyncLatestSettings(): Promise<FinancialSettings | null> {
+    try {
+      const result = await authorizedRequest((accessToken) => (
+        fetchFinancialSettings(accessToken)
+      ))
+      if (!mountedRef.current) return null
+      setSettings(result.settings)
+      settingsEtagRef.current = result.etag
+      return result.settings
+    } catch {
+      return null
+    }
+  }
+
   async function resolveEtag(): Promise<string | null> {
     if (settingsEtagRef.current) return settingsEtagRef.current
-    await loadDashboard({ resetForm: true, keepFormOpen: true })
+    await resyncLatestSettings()
     return settingsEtagRef.current
   }
 
-  function handleSaveError(error: unknown) {
+  async function handleSaveError(
+    error: unknown,
+    intended: FinancialSettingsUpdate,
+  ): Promise<void> {
     if (!isApiError(error)) {
       setBalanceError('Unable to save your starting balance. Please try again.')
       return
     }
-    if (error.status === 412) {
+
+    if (error.status === 412 || error.status === 428) {
+      // A conflict means the revision advanced elsewhere. Refresh the ETag but
+      // leave the user's entry in place so they can save again immediately.
+      const latest = await resyncLatestSettings()
+      if (!latest) {
+        setBalanceError(
+          'Your starting balance was changed elsewhere, but the latest settings could not be reloaded. Check your connection and try again.',
+        )
+        return
+      }
       setBalanceNotice(
-        'Your starting balance was changed elsewhere. The latest settings are being reloaded; review them and save again.',
+        error.status === 412
+          ? 'Your starting balance was changed elsewhere. The latest settings and revision have been loaded, and your entry has been kept. You can safely save again.'
+          : 'The settings revision was missing. The latest settings and revision have been loaded, and your entry has been kept. You can safely save again.',
       )
-      void loadDashboard({ resetForm: true, keepFormOpen: true })
       return
     }
-    if (error.status === 428) {
-      setBalanceNotice(
-        'The settings revision was missing. The latest settings are being reloaded; try saving again.',
+
+    if (isColdStartFailure(error)) {
+      // The PUT may have committed even though its response was lost. Read the
+      // authoritative settings and reconcile instead of blindly retrying with
+      // a revision that may already be stale.
+      const latest = await resyncLatestSettings()
+      if (!latest) {
+        setBalanceError(
+          'Unable to confirm whether your starting balance was saved because the server could not be reached. Your entry has been kept; check your connection and try again.',
+        )
+        return
+      }
+      if (matchesIntendedSettings(latest, intended)) {
+        applySettingsToForm(latest, true)
+        setBalanceFormOpen(true)
+        setBalanceNotice('Your starting balance was saved. Refreshing the dashboard balance…')
+        await loadDashboard({ resetForm: true, keepFormOpen: true })
+        return
+      }
+      setBalanceError(
+        'The server could not confirm the save. The latest settings and revision have been loaded and your entry has been kept; review it and save again.',
       )
-      void loadDashboard({ resetForm: true, keepFormOpen: true })
       return
     }
+
     if (error.status === 401) {
       setBalanceError(
         'Your session has expired. Sign in again to save your starting balance.',
@@ -292,6 +396,7 @@ function DashboardReports({ active = true }: { active?: boolean }) {
 
   async function saveStartingBalance(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (savingRef.current) return
     setBalanceError('')
     setBalanceNotice('')
 
@@ -303,27 +408,31 @@ function DashboardReports({ active = true }: { active?: boolean }) {
       setBalanceError('Enter a whole-Kyat starting balance within the supported range.')
       return
     }
-    if (!isValidDateOnly(balanceForm.effectiveDate)) {
+    const effectiveDate = balanceForm.effectiveDate
+    if (!isValidDateOnly(effectiveDate)) {
       setBalanceError('Choose a valid effective date.')
       return
     }
 
-    const etag = await resolveEtag()
-    if (!etag) {
-      setBalanceError(
-        'The server did not provide a settings revision. Reload the dashboard and try again.',
-      )
-      return
-    }
-
+    // Mark the submission busy before the first await so a second submit
+    // cannot resolve and send the same ETag concurrently.
+    savingRef.current = true
     setSaving(true)
     try {
+      const etag = await resolveEtag()
+      if (!etag) {
+        setBalanceError(
+          'The server did not provide a settings revision. Reload the dashboard and try again.',
+        )
+        return
+      }
+
       const result = await authorizedRequest((accessToken) =>
         updateFinancialSettings(
           accessToken,
           {
             starting_balance_kyat: amountKyat,
-            effective_date: balanceForm.effectiveDate,
+            effective_date: effectiveDate,
           },
           etag,
         ),
@@ -337,8 +446,12 @@ function DashboardReports({ active = true }: { active?: boolean }) {
       await loadDashboard({ resetForm: true })
     } catch (error) {
       if (!mountedRef.current) return
-      handleSaveError(error)
+      await handleSaveError(error, {
+        starting_balance_kyat: amountKyat,
+        effective_date: effectiveDate,
+      })
     } finally {
+      savingRef.current = false
       if (mountedRef.current) setSaving(false)
     }
   }
@@ -348,20 +461,22 @@ function DashboardReports({ active = true }: { active?: boolean }) {
       'Clear the starting balance and effective date? The account balance will be shown as not configured.',
     )
     if (!confirmed) return
+    if (savingRef.current) return
 
     setBalanceError('')
     setBalanceNotice('')
 
-    const etag = await resolveEtag()
-    if (!etag) {
-      setBalanceError(
-        'The server did not provide a settings revision. Reload the dashboard and try again.',
-      )
-      return
-    }
-
+    savingRef.current = true
     setSaving(true)
     try {
+      const etag = await resolveEtag()
+      if (!etag) {
+        setBalanceError(
+          'The server did not provide a settings revision. Reload the dashboard and try again.',
+        )
+        return
+      }
+
       const result = await authorizedRequest((accessToken) =>
         updateFinancialSettings(
           accessToken,
@@ -379,8 +494,12 @@ function DashboardReports({ active = true }: { active?: boolean }) {
       await loadDashboard({ resetForm: true })
     } catch (error) {
       if (!mountedRef.current) return
-      handleSaveError(error)
+      await handleSaveError(error, {
+        starting_balance_kyat: null,
+        effective_date: null,
+      })
     } finally {
+      savingRef.current = false
       if (mountedRef.current) setSaving(false)
     }
   }

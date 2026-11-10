@@ -73,16 +73,43 @@ type RestoreStage = 'csrf' | 'refresh' | 'profile'
 class SessionRestoreError extends Error {
   readonly stage: RestoreStage
   readonly originalError: unknown
+  /**
+   * A session that can be reused for a manual retry. It is present when the
+   * refresh step succeeded but only the profile GET failed, so a retry does not
+   * have to rotate the refresh token a second time.
+   */
+  readonly reusableSession: AuthSession | null
 
-  constructor(stage: RestoreStage, originalError: unknown) {
+  constructor(
+    stage: RestoreStage,
+    originalError: unknown,
+    reusableSession: AuthSession | null = null,
+  ) {
     super('Session restoration failed.')
     this.name = 'SessionRestoreError'
     this.stage = stage
     this.originalError = originalError
+    this.reusableSession = reusableSession
   }
 }
 
-async function restoreExistingSession(): Promise<RestoredSession> {
+async function restoreExistingSession(
+  reusableSession: AuthSession | null,
+): Promise<RestoredSession> {
+  // A retry after a profile-only failure can reuse the already-rotated
+  // session and repeat only the safe GET. Falling back to the refresh flow is
+  // still required if the access token itself was rejected.
+  if (reusableSession) {
+    try {
+      const user = await fetchCurrentUser(reusableSession.access_token)
+      return { session: reusableSession, user }
+    } catch (error) {
+      if (!isApiError(error) || error.status !== 401) {
+        throw new SessionRestoreError('profile', error, reusableSession)
+      }
+    }
+  }
+
   let csrfToken: string
   try {
     csrfToken = await fetchCsrfToken()
@@ -104,7 +131,7 @@ async function restoreExistingSession(): Promise<RestoredSession> {
   try {
     user = await fetchCurrentUser(session.access_token)
   } catch (error) {
-    throw new SessionRestoreError('profile', error)
+    throw new SessionRestoreError('profile', error, session)
   }
 
   return { session, user }
@@ -122,11 +149,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const activeRef = useRef(true)
 
   const performRestore = useCallback(() => {
-    if (!restorePromiseRef.current) {
-      restorePromiseRef.current = restoreExistingSession()
-    }
+    if (restorePromiseRef.current) return
 
-    restorePromiseRef.current
+    // Reuse a session that was already rotated by a previous attempt, so a
+    // manual retry after a profile-only outage does not refresh a second time.
+    const promise = restoreExistingSession(sessionRef.current)
+    restorePromiseRef.current = promise
+
+    promise
       .then(({ session, user }) => {
         if (!activeRef.current) return
         sessionRef.current = session
@@ -135,12 +165,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .catch((error: unknown) => {
         if (!activeRef.current) return
 
-        sessionRef.current = null
         const stage = error instanceof SessionRestoreError ? error.stage : null
         const originalError = error instanceof SessionRestoreError
           ? error.originalError
           : error
+        const reusableSession = error instanceof SessionRestoreError
+          ? error.reusableSession
+          : null
         const coldStart = isColdStartFailure(originalError)
+
+        // Keep a session the server already issued only when the failure is
+        // transient: a temporary outage must not look like a signed-out user,
+        // but a definitive or non-transient rejection must not leave a usable
+        // token behind while the UI shows the login screen.
+        sessionRef.current = coldStart ? reusableSession : null
 
         // A failed safe GET can be retried by the user. A failed refresh POST
         // must not be retried: the server may already have rotated the token
@@ -162,6 +200,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             : null,
         })
       })
+      .finally(() => {
+        if (restorePromiseRef.current === promise) {
+          restorePromiseRef.current = null
+        }
+      })
   }, [])
 
   useEffect(() => {
@@ -174,7 +217,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [performRestore])
 
   const retryRestore = useCallback(() => {
-    restorePromiseRef.current = null
+    // Ignore repeated clicks while a restoration is already in flight; starting
+    // a second one could send two refresh requests.
+    if (restorePromiseRef.current) return
     setState({ status: 'restoring', user: null, restoreIssue: null })
     performRestore()
   }, [performRestore])
@@ -196,8 +241,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return session
       })
       .catch((error: unknown) => {
-        sessionRef.current = null
-        setState({ status: 'anonymous', user: null, restoreIssue: null })
+        // Only a definitive authentication rejection ends the local session.
+        // Network failures and 5xx responses mean the backend is temporarily
+        // unavailable; clearing the session here would sign the user out for
+        // an outage the user cannot control.
+        if (
+          isApiError(error)
+          && (error.status === 401 || error.status === 403)
+        ) {
+          sessionRef.current = null
+          setState({ status: 'anonymous', user: null, restoreIssue: null })
+        }
         throw error
       })
 
