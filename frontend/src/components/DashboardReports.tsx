@@ -100,6 +100,7 @@ function DashboardReports({ active = true }: { active?: boolean }) {
   const [balanceError, setBalanceError] = useState('')
   const [balanceNotice, setBalanceNotice] = useState('')
   const settingsEtagRef = useRef<string | null>(null)
+  const settingsLoadedRef = useRef(false)
   const savingRef = useRef(false)
   const hasLoadedRef = useRef(false)
   const wasActiveRef = useRef(active)
@@ -173,6 +174,8 @@ function DashboardReports({ active = true }: { active?: boolean }) {
       if (!mountedRef.current || requestId !== requestIdRef.current) return
 
       const firstLoad = !hasLoadedRef.current
+      const recoveredSettingsForm = !settingsLoadedRef.current
+        && hasLoadedRef.current
       let firstError: unknown = null
 
       // Apply the settings and their ETag as soon as they are available. A
@@ -182,12 +185,20 @@ function DashboardReports({ active = true }: { active?: boolean }) {
         const settingsResult = result.settingsOutcome.value
         setSettings(settingsResult.settings)
         settingsEtagRef.current = settingsResult.etag
-        if (firstLoad || options.resetForm) {
+        if (
+          firstLoad
+          || options.resetForm
+          || (
+            recoveredSettingsForm
+            && settingsResult.settings.status === 'not_configured'
+          )
+        ) {
           applySettingsToForm(
             settingsResult.settings,
             options.keepFormOpen,
           )
         }
+        settingsLoadedRef.current = true
       } else {
         firstError = result.settingsOutcome.reason
       }
@@ -589,6 +600,18 @@ function DashboardReports({ active = true }: { active?: boolean }) {
       </p>
 
       {loadError && <p className="form-error" role="alert">{loadError}</p>}
+
+      {loadError && overview && !loading && (
+        <div className="form-actions">
+          <button
+            className="text-button"
+            type="button"
+            onClick={() => { void loadDashboard() }}
+          >
+            Retry
+          </button>
+        </div>
+      )}
 
       {!overview && loading && (
         <section className="panel report-panel" aria-live="polite">

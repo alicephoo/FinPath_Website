@@ -975,4 +975,112 @@ describe('DashboardReports load failures', () => {
       'Your session has expired. Sign in again to view your dashboard.',
     )
   })
+
+  it('offers a retry and opens the setup form when only settings fail', async () => {
+    mocks.fetchFinancialSettings
+      .mockRejectedValueOnce(new ApiError({
+        status: 503,
+        code: 'database_unavailable',
+        message: 'The database is temporarily unavailable.',
+      }))
+      .mockResolvedValueOnce({
+        settings: notConfiguredSettings(),
+        etag: '"1"',
+      })
+    mocks.fetchDashboardOverview.mockResolvedValue(overviewFixture({
+      account_balance: notConfiguredBalance(),
+    }))
+
+    render(<DashboardReports />)
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'The database is temporarily unavailable.',
+    )
+    expect(screen.getByRole('heading', {
+      name: 'Calculated account balance',
+    })).toBeInTheDocument()
+    expect(screen.getByText('Not configured')).toBeInTheDocument()
+    expect(screen.queryByRole('heading', {
+      name: 'Set up starting balance',
+    })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+
+    expect(await screen.findByRole('heading', {
+      name: 'Set up starting balance',
+    })).toBeInTheDocument()
+    expect(mocks.fetchFinancialSettings).toHaveBeenCalledTimes(2)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('applies the missed settings form when the dashboard tab is revisited', async () => {
+    mocks.fetchFinancialSettings
+      .mockRejectedValueOnce(new ApiError({
+        status: 503,
+        code: 'database_unavailable',
+        message: 'The database is temporarily unavailable.',
+      }))
+      .mockResolvedValueOnce({
+        settings: notConfiguredSettings(),
+        etag: '"1"',
+      })
+    mocks.fetchDashboardOverview.mockResolvedValue(overviewFixture({
+      account_balance: notConfiguredBalance(),
+    }))
+
+    const view = render(<DashboardReports />)
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'The database is temporarily unavailable.',
+    )
+    expect(screen.queryByRole('heading', {
+      name: 'Set up starting balance',
+    })).not.toBeInTheDocument()
+
+    view.rerender(<DashboardReports active={false} />)
+    view.rerender(<DashboardReports active />)
+
+    expect(await screen.findByRole('heading', {
+      name: 'Set up starting balance',
+    })).toBeInTheDocument()
+    expect(mocks.fetchFinancialSettings).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not overwrite an in-progress edit when settings recover', async () => {
+    mocks.fetchFinancialSettings
+      .mockRejectedValueOnce(new ApiError({
+        status: 503,
+        code: 'database_unavailable',
+        message: 'The database is temporarily unavailable.',
+      }))
+      .mockResolvedValueOnce({
+        settings: settingsFixture({
+          starting_balance_kyat: 2_000_000,
+          effective_date: '2026-11-01',
+          amount_kyat: 2_000_000,
+        }),
+        etag: '"8"',
+      })
+
+    const view = render(<DashboardReports />)
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'The database is temporarily unavailable.',
+    )
+
+    const form = openEditForm()
+    fillBalanceForm(form, '1234567', '2026-11-05')
+
+    view.rerender(<DashboardReports active={false} />)
+    view.rerender(<DashboardReports active />)
+
+    await waitFor(() => {
+      expect(mocks.fetchFinancialSettings).toHaveBeenCalledTimes(2)
+    })
+    expect(within(form).getByLabelText(/Starting bank balance/))
+      .toHaveValue(1_234_567)
+    expect(within(form).getByLabelText(/Effective date/))
+      .toHaveValue('2026-11-05')
+    expect(form).toBeInTheDocument()
+  })
 })
