@@ -99,12 +99,25 @@ function card(name = goal.name): HTMLElement {
   return screen.getByRole('article', { name })
 }
 
-function openHistory(article = card()): void {
+async function openHistory(article = card()): Promise<void> {
   const details = article.querySelector(
     '.savings-history',
   ) as HTMLDetailsElement
-  details.open = true
-  fireEvent(details, new Event('toggle'))
+  const callsBefore = mocks.fetchSavingsEntries.mock.calls.length
+  if (details.open) {
+    // jsdom only queues a native `toggle` when the `open` attribute changes.
+    // The element is already open here, so request the history again
+    // explicitly; no native event will be queued, so this fires exactly once.
+    fireEvent(details, new Event('toggle'))
+  } else {
+    // Changing `open` makes jsdom queue exactly one native `toggle` event,
+    // which React listens for on the element. Dispatching another one here
+    // would start a duplicate request and race the assertions.
+    details.open = true
+  }
+  await waitFor(() => {
+    expect(mocks.fetchSavingsEntries.mock.calls.length).toBe(callsBefore + 1)
+  })
 }
 
 async function renderLoaded(goals: SavingsGoalResource[] = [goal]) {
@@ -469,7 +482,7 @@ describe('SavingsGoalsSection backend integration', () => {
     await renderLoaded()
 
     expect(mocks.fetchSavingsEntries).not.toHaveBeenCalled()
-    openHistory()
+    await openHistory()
     expect(screen.getByText('Loading savings entries…')).toBeInTheDocument()
 
     history.resolve([])
@@ -481,7 +494,7 @@ describe('SavingsGoalsSection backend integration', () => {
       code: 'server_error',
       message: 'Contribution history is unavailable.',
     }))
-    openHistory()
+    await openHistory()
     expect(await screen.findByText('Contribution history is unavailable.'))
       .toBeInTheDocument()
 

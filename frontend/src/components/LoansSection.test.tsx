@@ -100,12 +100,25 @@ function record(name = loan.name): HTMLElement {
   return screen.getByRole('article', { name })
 }
 
-function openHistory(article = record()): void {
+async function openHistory(article = record()): Promise<void> {
   const details = article.querySelector(
     '.repayment-history',
   ) as HTMLDetailsElement
-  details.open = true
-  fireEvent(details, new Event('toggle'))
+  const callsBefore = mocks.fetchRepayments.mock.calls.length
+  if (details.open) {
+    // jsdom only queues a native `toggle` when the `open` attribute changes.
+    // The element is already open here, so request the history again
+    // explicitly; no native event will be queued, so this fires exactly once.
+    fireEvent(details, new Event('toggle'))
+  } else {
+    // Changing `open` makes jsdom queue exactly one native `toggle` event,
+    // which React listens for on the element. Dispatching another one here
+    // would start a duplicate request and race the assertions.
+    details.open = true
+  }
+  await waitFor(() => {
+    expect(mocks.fetchRepayments.mock.calls.length).toBe(callsBefore + 1)
+  })
 }
 
 async function renderLoaded(loans: LoanResource[] = [loan]) {
@@ -222,7 +235,7 @@ describe('LoansSection backend integration', () => {
     await renderLoaded()
 
     expect(mocks.fetchRepayments).not.toHaveBeenCalled()
-    openHistory()
+    await openHistory()
 
     expect(await screen.findByText('Monthly payment')).toBeInTheDocument()
     expect(screen.getByText('Earlier payment')).toBeInTheDocument()
@@ -239,7 +252,7 @@ describe('LoansSection backend integration', () => {
     mocks.fetchRepayments.mockReturnValueOnce(history.promise)
     await renderLoaded()
 
-    openHistory()
+    await openHistory()
     expect(screen.getByText('Loading repayments…')).toBeInTheDocument()
 
     history.resolve([])
@@ -251,7 +264,7 @@ describe('LoansSection backend integration', () => {
       code: 'server_error',
       message: 'Repayment history is unavailable.',
     }))
-    openHistory()
+    await openHistory()
     expect(await screen.findByText('Repayment history is unavailable.'))
       .toBeInTheDocument()
 
