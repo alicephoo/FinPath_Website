@@ -15,6 +15,7 @@ import {
 import {
   fetchFinancialSettings,
   updateFinancialSettings,
+  type AccountBalanceResource,
   type FinancialSettings,
   type FinancialSettingsUpdate,
 } from '../api/financialSettings'
@@ -78,6 +79,51 @@ function matchesIntendedSettings(
     && settings.effective_date === intended.effective_date
 }
 
+const SETTINGS_ETAG_REVISION = /^"([0-9]+)"$/
+
+function settingsRevision(etag: string | null): number | null {
+  if (etag === null) return null
+  const match = SETTINGS_ETAG_REVISION.exec(etag)
+  if (!match) return null
+  const revision = Number(match[1])
+  return Number.isSafeInteger(revision) ? revision : null
+}
+
+/**
+ * Revisions only move forward. A response that resolves late must never
+ * replace a newer ETag, otherwise the next save would reuse a stale revision.
+ * A missing or non-numeric incoming value is ignored while a numeric revision
+ * is already known.
+ */
+export function shouldReplaceSettingsEtag(
+  current: string | null,
+  incoming: string | null,
+): boolean {
+  if (incoming === null) return false
+  if (current === null) return true
+  const currentRevision = settingsRevision(current)
+  const incomingRevision = settingsRevision(incoming)
+  if (incomingRevision === null) {
+    return currentRevision === null && incoming !== current
+  }
+  return currentRevision === null || incomingRevision >= currentRevision
+}
+
+/**
+ * Prefer the dashboard's calculated balance, but fall back to the financial
+ * settings snapshot when the overview is stale or unavailable. Both values are
+ * backend-calculated; the starting-balance amount is never used as a
+ * substitute for the calculated balance.
+ */
+function mergeConfiguredBalance(
+  overviewBalance: AccountBalanceResource | null,
+  settings: FinancialSettings | null,
+): AccountBalanceResource | null {
+  if (overviewBalance?.status === 'configured') return overviewBalance
+  if (settings?.status === 'configured') return settings
+  return null
+}
+
 function DashboardReports({ active = true }: { active?: boolean }) {
   const { user, authorizedRequest } = useAuth()
   const [overview, setOverview] = useState<DashboardOverview | null>(null)
@@ -100,6 +146,14 @@ function DashboardReports({ active = true }: { active?: boolean }) {
   const [balanceError, setBalanceError] = useState('')
   const [balanceNotice, setBalanceNotice] = useState('')
   const settingsEtagRef = useRef<string | null>(null)
+  // Monotonic generation for authoritative settings snapshots. A settings
+  // resync or a successful PUT advances it so an older in-flight GET cannot
+  // apply its stale settings or revision afterwards.
+  const settingsSyncRef = useRef(0)
+  // Newest settings snapshot that has been committed, used to keep the
+  // calculated balance authoritative when an older overview response resolves
+  // after a resync or save.
+  const latestSettingsRef = useRef<FinancialSettings | null>(null)
   const settingsLoadedRef = useRef(false)
   const savingRef = useRef(false)
   const hasLoadedRef = useRef(false)
@@ -139,8 +193,23 @@ function DashboardReports({ active = true }: { active?: boolean }) {
     }
   }, [])
 
+  const commitSettingsEtag = useCallback((etag: string | null) => {
+    if (shouldReplaceSettingsEtag(settingsEtagRef.current, etag)) {
+      settingsEtagRef.current = etag
+    }
+  }, [])
+
+  const commitSettingsSnapshot = useCallback(
+    (nextSettings: FinancialSettings) => {
+      latestSettingsRef.current = nextSettings
+      setSettings(nextSettings)
+    },
+    [],
+  )
+
   const loadDashboard = useCallback(async (options: LoadOptions = {}) => {
     const requestId = ++requestIdRef.current
+    const settingsEpoch = settingsSyncRef.current
     setLoading(true)
     setLoadError('')
 
@@ -181,32 +250,63 @@ function DashboardReports({ active = true }: { active?: boolean }) {
       // Apply the settings and their ETag as soon as they are available. A
       // failing overview request must not prevent the revision from being
       // refreshed, otherwise a 412 recovery would keep resending a stale ETag.
+      let committedSettings: FinancialSettings | null = null
       if (result.settingsOutcome.status === 'fulfilled') {
-        const settingsResult = result.settingsOutcome.value
-        setSettings(settingsResult.settings)
-        settingsEtagRef.current = settingsResult.etag
-        if (
-          firstLoad
-          || options.resetForm
-          || (
-            recoveredSettingsForm
-            && settingsResult.settings.status === 'not_configured'
-          )
-        ) {
-          applySettingsToForm(
-            settingsResult.settings,
-            options.keepFormOpen,
-          )
+        // A settings resync or a successful save may have advanced the
+        // generation while this request was in flight. In that case its
+        // snapshot is older, so leave the newer settings, ETag, and form alone.
+        if (settingsEpoch === settingsSyncRef.current) {
+          const settingsResult = result.settingsOutcome.value
+          committedSettings = settingsResult.settings
+          commitSettingsSnapshot(settingsResult.settings)
+          commitSettingsEtag(settingsResult.etag)
+          if (
+            firstLoad
+            || options.resetForm
+            || (
+              recoveredSettingsForm
+              && settingsResult.settings.status === 'not_configured'
+            )
+          ) {
+            applySettingsToForm(
+              settingsResult.settings,
+              options.keepFormOpen,
+            )
+          }
+          settingsLoadedRef.current = true
         }
-        settingsLoadedRef.current = true
       } else {
         firstError = result.settingsOutcome.reason
       }
 
+      // The latest settings snapshot wins over an older overview balance. When
+      // this response predates a resync or save, keep the balance that the
+      // newer snapshot already applied so a late response cannot roll it back.
+      const authoritativeBalance = committedSettings !== null
+        ? committedSettings
+        : settingsEpoch === settingsSyncRef.current
+          ? null
+          : latestSettingsRef.current
+
       if (result.overviewOutcome.status === 'fulfilled') {
-        setOverview(result.overviewOutcome.value)
+        const nextOverview = result.overviewOutcome.value
+        setOverview(authoritativeBalance !== null
+          ? { ...nextOverview, account_balance: authoritativeBalance }
+          : nextOverview)
       } else if (firstError === null) {
         firstError = result.overviewOutcome.reason
+      }
+
+      // A settings snapshot that arrived without a matching overview still
+      // drives the card and the Edit form.
+      const settingsToMerge = committedSettings
+      if (
+        settingsToMerge !== null
+        && result.overviewOutcome.status !== 'fulfilled'
+      ) {
+        setOverview((current) => current
+          ? { ...current, account_balance: settingsToMerge }
+          : current)
       }
 
       if (
@@ -227,7 +327,7 @@ function DashboardReports({ active = true }: { active?: boolean }) {
         setLoading(false)
       }
     }
-  }, [applySettingsToForm, authorizedRequest])
+  }, [applySettingsToForm, authorizedRequest, commitSettingsEtag, commitSettingsSnapshot])
 
   const loadReports = useCallback(async () => {
     const requestId = ++reportsRequestIdRef.current
@@ -288,9 +388,12 @@ function DashboardReports({ active = true }: { active?: boolean }) {
   }, [active, loadDashboard, loadReports])
 
   function openBalanceForm() {
-    const savedBalance = settings ?? overview?.account_balance ?? null
+    const savedBalance = mergeConfiguredBalance(
+      overview?.account_balance ?? null,
+      settings,
+    )
     if (
-      savedBalance?.status === 'configured'
+      savedBalance !== null
       && savedBalance.starting_balance_kyat !== null
       && savedBalance.effective_date !== null
     ) {
@@ -313,18 +416,30 @@ function DashboardReports({ active = true }: { active?: boolean }) {
   }
 
   /**
-   * Read the current settings and revision without touching the form, the
-   * dashboard overview, or any in-progress user input. Used to recover from a
-   * conflict or an ambiguous save result.
+   * Read the current settings and revision without touching the form or any
+   * in-progress user input. Used to recover from a conflict or an ambiguous
+   * save result. The resynced snapshot also replaces the calculated balance so
+   * the card and a reopened Edit form show the latest values.
    */
   async function resyncLatestSettings(): Promise<FinancialSettings | null> {
+    // Advance the generation before the request starts so any older settings
+    // GET that is still in flight cannot apply itself after this resync.
+    const settingsEpoch = ++settingsSyncRef.current
     try {
       const result = await authorizedRequest((accessToken) => (
         fetchFinancialSettings(accessToken)
       ))
       if (!mountedRef.current) return null
-      setSettings(result.settings)
-      settingsEtagRef.current = result.etag
+      if (settingsEpoch === settingsSyncRef.current) {
+        commitSettingsSnapshot(result.settings)
+        commitSettingsEtag(result.etag)
+        // Keep the calculated card and the Edit form on the resynced snapshot
+        // even though the rest of the dashboard is not reloaded here.
+        setOverview((current) => current
+          ? { ...current, account_balance: result.settings }
+          : current)
+        settingsLoadedRef.current = true
+      }
       return result.settings
     } catch {
       return null
@@ -445,13 +560,26 @@ function DashboardReports({ active = true }: { active?: boolean }) {
             starting_balance_kyat: amountKyat,
             effective_date: effectiveDate,
           },
+          // Use the revision captured for this save attempt. Re-reading a
+          // newer ETag here (for example during the 401 refresh-and-retry
+          // window) would silently overwrite another writer's update; a real
+          // conflict must surface as 412 and be reconciled by handleSaveError.
           etag,
         ),
       )
       if (!mountedRef.current) return
 
-      setSettings(result.settings)
+      settingsSyncRef.current += 1
+      commitSettingsSnapshot(result.settings)
+      // The PUT response is authoritative and newer than any in-flight GET.
+      // Storing its ETag directly also clears the revision when the response
+      // omits one, forcing a resync before the next save.
       settingsEtagRef.current = result.etag
+      // The PUT response carries the freshly calculated balance, so keep the
+      // visible account balance correct even if the overview refresh fails.
+      setOverview((current) => current
+        ? { ...current, account_balance: result.settings }
+        : current)
       applySettingsToForm(result.settings)
       setBalanceNotice('Starting balance saved. Refreshing the dashboard balance…')
       await loadDashboard({ resetForm: true })
@@ -492,13 +620,19 @@ function DashboardReports({ active = true }: { active?: boolean }) {
         updateFinancialSettings(
           accessToken,
           { starting_balance_kyat: null, effective_date: null },
+          // Keep the revision captured for this clear attempt so an update
+          // observed during a token refresh cannot bypass a real conflict.
           etag,
         ),
       )
       if (!mountedRef.current) return
 
-      setSettings(result.settings)
+      settingsSyncRef.current += 1
+      commitSettingsSnapshot(result.settings)
       settingsEtagRef.current = result.etag
+      setOverview((current) => current
+        ? { ...current, account_balance: result.settings }
+        : current)
       setBalanceForm({ amount: '', effectiveDate: localDateString() })
       setBalanceFormOpen(true)
       setBalanceNotice('Starting balance cleared. Refreshing the dashboard balance…')
@@ -515,8 +649,14 @@ function DashboardReports({ active = true }: { active?: boolean }) {
     }
   }
 
-  const balance = overview?.account_balance ?? null
-  const configuredBalance = balance?.status === 'configured' ? balance : null
+  const overviewBalance = overview?.account_balance ?? null
+  const balance = overviewBalance ?? settings
+  const configuredBalance = mergeConfiguredBalance(overviewBalance, settings)
+  // The overview supplies the full dashboard, while financial settings are
+  // enough to show a confirmed calculated balance if the overview is missing.
+  // Keep the card mounted while an overview retry is in flight so configured
+  // settings do not briefly disappear.
+  const showBalanceCard = overview !== null || settings !== null
   const recentTransactions = overview?.recent_transactions ?? []
   const savingsGoals = overview?.savings_goals ?? []
   const cashFlowMonths = cashFlow?.months ?? []
@@ -633,10 +773,11 @@ function DashboardReports({ active = true }: { active?: boolean }) {
         </section>
       )}
 
-      {overview && (
-        <>
-          {loading && <p className="report-note" role="status">Refreshing dashboard…</p>}
+      {overview && loading && (
+        <p className="report-note" role="status">Refreshing dashboard…</p>
+      )}
 
+      {showBalanceCard && (
           <section className="account-balance-card" aria-labelledby="account-balance-title">
             <div className="account-balance-summary">
               <div>
@@ -748,7 +889,10 @@ function DashboardReports({ active = true }: { active?: boolean }) {
               </form>
             )}
           </section>
+      )}
 
+      {overview && (
+        <>
           <section className="report-summary-grid" aria-label="Recorded financial summary">
             <article className="report-summary-card">
               <span>All-time recorded income</span>
