@@ -207,6 +207,206 @@ def test_financial_settings_update_negative_and_clear(
     asyncio.run(scenario())
 
 
+def test_financial_settings_accepts_weak_etag_from_edge(
+    tx_env: TransactionEnv,
+):
+    """The Pages edge weakens strong ETags to W/"N" in transit.
+
+    The backend still emits the canonical strong tag, but must accept the weak
+    form because the revision carried by W/"N" is N.
+    """
+
+    async def scenario() -> None:
+        async with tx_env.client() as client:
+            _, session = await register_verify_login(client, tx_env)
+            token = session["access_token"]
+            user_id = session["user"]["id"]
+
+            initial = await client.get(
+                SETTINGS_PATH,
+                headers=headers(token=token),
+            )
+            assert initial.status_code == 200, initial.text
+            # GET keeps the canonical strong form.
+            assert initial.headers["etag"] == '"1"'
+            assert initial.json()["data"]["status"] == "not_configured"
+
+            configured = await put_settings(
+                client,
+                token,
+                {
+                    "starting_balance_kyat": 800_000,
+                    "effective_date": EFFECTIVE_DATE.isoformat(),
+                },
+                if_match='W/"1"',
+            )
+            assert configured.status_code == 200, configured.text
+            assert configured.headers["etag"] == '"2"'
+            configured_data = configured.json()["data"]
+            assert configured_data["status"] == "configured"
+            assert configured_data["starting_balance_kyat"] == 800_000
+            assert configured_data["effective_date"] == (
+                EFFECTIVE_DATE.isoformat()
+            )
+
+            stored = tx_env.one(
+                "SELECT starting_balance_kyat, effective_date, revision "
+                "FROM user_financial_settings WHERE user_id = :user_id",
+                {"user_id": user_id},
+            )
+            assert stored is not None
+            assert stored["starting_balance_kyat"] == 800_000
+            assert stored["effective_date"] == EFFECTIVE_DATE
+            assert stored["revision"] == 2
+
+            reread = await client.get(
+                SETTINGS_PATH,
+                headers=headers(token=token),
+            )
+            assert reread.status_code == 200, reread.text
+            assert reread.headers["etag"] == '"2"'
+            assert reread.json()["data"] == configured_data
+
+            updated = await put_settings(
+                client,
+                token,
+                {
+                    "starting_balance_kyat": -250_000,
+                    "effective_date": SECOND_EFFECTIVE_DATE.isoformat(),
+                },
+                if_match='W/"2"',
+            )
+            assert updated.status_code == 200, updated.text
+            assert updated.headers["etag"] == '"3"'
+            assert updated.json()["data"]["starting_balance_kyat"] == -250_000
+
+            cleared = await put_settings(
+                client,
+                token,
+                {
+                    "starting_balance_kyat": None,
+                    "effective_date": None,
+                },
+                if_match='W/"3"',
+            )
+            assert cleared.status_code == 200, cleared.text
+            assert cleared.headers["etag"] == '"4"'
+            assert cleared.json()["data"]["status"] == "not_configured"
+
+    asyncio.run(scenario())
+
+
+def test_financial_settings_weak_etag_still_rejects_stale_revision(
+    tx_env: TransactionEnv,
+):
+    """Accepting W/"N" must not weaken optimistic concurrency."""
+
+    async def scenario() -> None:
+        async with tx_env.client() as client:
+            _, session = await register_verify_login(client, tx_env)
+            token = session["access_token"]
+
+            # Two sessions observe revision 1.
+            first_load = await client.get(
+                SETTINGS_PATH,
+                headers=headers(token=token),
+            )
+            second_load = await client.get(
+                SETTINGS_PATH,
+                headers=headers(token=token),
+            )
+            assert first_load.headers["etag"] == '"1"'
+            assert second_load.headers["etag"] == '"1"'
+
+            first_update = await put_settings(
+                client,
+                token,
+                {
+                    "starting_balance_kyat": 100_000,
+                    "effective_date": EFFECTIVE_DATE.isoformat(),
+                },
+                if_match='W/"1"',
+            )
+            assert first_update.status_code == 200, first_update.text
+            assert first_update.headers["etag"] == '"2"'
+
+            stale = await put_settings(
+                client,
+                token,
+                {
+                    "starting_balance_kyat": 200_000,
+                    "effective_date": EFFECTIVE_DATE.isoformat(),
+                },
+                if_match='W/"1"',
+            )
+            assert stale.status_code == 412, stale.text
+            assert stale.json()["error"]["code"] == "stale_revision"
+
+            resynced = await client.get(
+                SETTINGS_PATH,
+                headers=headers(token=token),
+            )
+            assert resynced.status_code == 200, resynced.text
+            assert resynced.headers["etag"] == '"2"'
+            assert resynced.json()["data"]["starting_balance_kyat"] == 100_000
+
+            retried = await put_settings(
+                client,
+                token,
+                {
+                    "starting_balance_kyat": 200_000,
+                    "effective_date": EFFECTIVE_DATE.isoformat(),
+                },
+                if_match='W/"2"',
+            )
+            assert retried.status_code == 200, retried.text
+            assert retried.headers["etag"] == '"3"'
+            assert retried.json()["data"]["starting_balance_kyat"] == 200_000
+
+            for malformed in (
+                'W/"not-a-revision"',
+                'W/"3", "4"',
+                "W/3",
+                'w/"3"',
+                "*",
+                'W/"',
+            ):
+                rejected = await put_settings(
+                    client,
+                    token,
+                    {
+                        "starting_balance_kyat": 300_000,
+                        "effective_date": EFFECTIVE_DATE.isoformat(),
+                    },
+                    if_match=malformed,
+                )
+                assert rejected.status_code == 412, (malformed, rejected.text)
+                assert rejected.json()["error"]["code"] == "stale_revision"
+
+            missing_precondition = await put_settings(
+                client,
+                token,
+                {
+                    "starting_balance_kyat": 300_000,
+                    "effective_date": EFFECTIVE_DATE.isoformat(),
+                },
+                if_match=None,
+            )
+            assert missing_precondition.status_code == 428
+            assert missing_precondition.json()["error"]["code"] == (
+                "precondition_required"
+            )
+
+            unchanged = await client.get(
+                SETTINGS_PATH,
+                headers=headers(token=token),
+            )
+            assert unchanged.headers["etag"] == '"3"'
+            assert unchanged.json()["data"]["starting_balance_kyat"] == 200_000
+
+    asyncio.run(scenario())
+
+
 def test_financial_settings_validation(
     tx_env: TransactionEnv,
 ):

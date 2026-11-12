@@ -1228,6 +1228,355 @@ def test_repeated_completion_is_idempotent(tx_env: TransactionEnv):
     asyncio.run(scenario())
 
 
+def test_write_endpoints_accept_weak_if_match_revision_tokens(
+    tx_env: TransactionEnv,
+):
+    malformed_tags = (
+        'W/"not-a-revision"',
+        "W/1",
+        'w/"1"',
+        'W/"1", "2"',
+        'W/"',
+    )
+
+    async def scenario() -> None:
+        async with tx_env.client() as client:
+            _, session = await register_verify_login(client, tx_env)
+            token = session["access_token"]
+            configure_balance(tx_env, session)
+
+            # Trip PATCH, completion, and deletion.
+            trip = await create_trip(client, token, trip_payload())
+            assert trip.status_code == 201, trip.text
+            trip_id = trip.json()["data"]["id"]
+            trip_weak = f'W/{trip.headers["etag"]}'
+
+            missing = await client.patch(
+                f"/api/v1/trips/{trip_id}",
+                json={"name": "Missing"},
+                headers=headers(token=token),
+            )
+            assert missing.status_code == 428
+            assert missing.json()["error"]["code"] == "precondition_required"
+
+            stale = await client.patch(
+                f"/api/v1/trips/{trip_id}",
+                json={"name": "Stale"},
+                headers=headers(token=token, if_match='W/"99"'),
+            )
+            assert stale.status_code == 412
+            assert stale.json()["error"]["code"] == "stale_revision"
+
+            for malformed in malformed_tags:
+                response = await client.patch(
+                    f"/api/v1/trips/{trip_id}",
+                    json={"name": "Malformed"},
+                    headers=headers(token=token, if_match=malformed),
+                )
+                assert response.status_code == 412, (malformed, response.text)
+
+            updated = await client.patch(
+                f"/api/v1/trips/{trip_id}",
+                json={"name": "Weakly updated"},
+                headers=headers(token=token, if_match=trip_weak),
+            )
+            assert updated.status_code == 200, updated.text
+            assert updated.json()["data"]["name"] == "Weakly updated"
+            assert updated.headers["etag"] == '"2"'
+            updated_trip_weak = f'W/{updated.headers["etag"]}'
+
+            stale_weak = await client.patch(
+                f"/api/v1/trips/{trip_id}",
+                json={"name": "Stale weak"},
+                headers=headers(token=token, if_match=trip_weak),
+            )
+            assert stale_weak.status_code == 412
+            assert stale_weak.json()["error"]["code"] == "stale_revision"
+
+            stale_completion = await client.post(
+                f"/api/v1/trips/{trip_id}/complete",
+                headers=headers(
+                    token=token,
+                    idem=new_key("weak-complete-stale"),
+                    if_match=trip_weak,
+                ),
+            )
+            assert stale_completion.status_code == 412
+            assert stale_completion.json()["error"]["code"] == "stale_revision"
+
+            completed = await client.post(
+                f"/api/v1/trips/{trip_id}/complete",
+                headers=headers(
+                    token=token,
+                    idem=new_key("weak-complete"),
+                    if_match=updated_trip_weak,
+                ),
+            )
+            assert completed.status_code == 200, completed.text
+            assert completed.json()["data"]["status"] == "completed"
+            assert completed.headers["etag"] == '"3"'
+
+            missing_completion_trip = await create_trip(
+                client,
+                token,
+                trip_payload(name="Missing completion"),
+            )
+            missing_completion_id = missing_completion_trip.json()["data"]["id"]
+            missing_completion = await client.post(
+                f"/api/v1/trips/{missing_completion_id}/complete",
+                headers=headers(
+                    token=token,
+                    idem=new_key("weak-complete-missing"),
+                ),
+            )
+            assert missing_completion.status_code == 428
+            assert missing_completion.json()["error"]["code"] == (
+                "precondition_required"
+            )
+
+            delete_trip_created = await create_trip(
+                client,
+                token,
+                trip_payload(name="Weak delete"),
+            )
+            delete_trip_id = delete_trip_created.json()["data"]["id"]
+            delete_trip_weak = f'W/{delete_trip_created.headers["etag"]}'
+
+            delete_missing = await client.request(
+                "DELETE",
+                f"/api/v1/trips/{delete_trip_id}",
+                json={"confirm": True},
+                headers=headers(token=token, idem=new_key("weak-delete-trip")),
+            )
+            assert delete_missing.status_code == 428
+
+            delete_stale = await client.request(
+                "DELETE",
+                f"/api/v1/trips/{delete_trip_id}",
+                json={"confirm": True},
+                headers=headers(
+                    token=token,
+                    idem=new_key("weak-delete-trip-stale"),
+                    if_match='W/"99"',
+                ),
+            )
+            assert delete_stale.status_code == 412
+            assert delete_stale.json()["error"]["code"] == "stale_revision"
+
+            deleted = await client.request(
+                "DELETE",
+                f"/api/v1/trips/{delete_trip_id}",
+                json={"confirm": True},
+                headers=headers(
+                    token=token,
+                    idem=new_key("weak-delete-trip-ok"),
+                    if_match=delete_trip_weak,
+                ),
+            )
+            assert deleted.status_code == 204, deleted.text
+            cancelled = await read_trip(client, token, delete_trip_id)
+            assert cancelled.json()["data"]["status"] == "cancelled"
+
+            # Planned-expense PATCH and DELETE.
+            budget_trip = await create_trip(
+                client,
+                token,
+                trip_payload(name="Budget trip"),
+            )
+            budget_trip_id = budget_trip.json()["data"]["id"]
+            budget = await create_budget(
+                client,
+                token,
+                budget_trip_id,
+                budget_payload(),
+            )
+            assert budget.status_code == 201, budget.text
+            budget_id = budget.json()["data"]["id"]
+            budget_weak = f'W/{budget.headers["etag"]}'
+
+            budget_missing = await client.patch(
+                f"/api/v1/trips/{budget_trip_id}/budgets/{budget_id}",
+                json={"budget_kyat": 2_000_000},
+                headers=headers(token=token),
+            )
+            assert budget_missing.status_code == 428
+
+            budget_stale = await client.patch(
+                f"/api/v1/trips/{budget_trip_id}/budgets/{budget_id}",
+                json={"budget_kyat": 2_000_000},
+                headers=headers(token=token, if_match='W/"99"'),
+            )
+            assert budget_stale.status_code == 412
+
+            for malformed in malformed_tags:
+                response = await client.patch(
+                    f"/api/v1/trips/{budget_trip_id}/budgets/{budget_id}",
+                    json={"budget_kyat": 2_000_000},
+                    headers=headers(token=token, if_match=malformed),
+                )
+                assert response.status_code == 412, (malformed, response.text)
+
+            budget_updated = await client.patch(
+                f"/api/v1/trips/{budget_trip_id}/budgets/{budget_id}",
+                json={"category": "Air travel", "budget_kyat": 2_000_000},
+                headers=headers(token=token, if_match=budget_weak),
+            )
+            assert budget_updated.status_code == 200, budget_updated.text
+            assert budget_updated.json()["data"]["category"] == "Air travel"
+            assert budget_updated.json()["data"]["budget_kyat"] == 2_000_000
+            assert budget_updated.headers["etag"] == '"2"'
+            updated_budget_weak = f'W/{budget_updated.headers["etag"]}'
+
+            budget_stale_weak = await client.patch(
+                f"/api/v1/trips/{budget_trip_id}/budgets/{budget_id}",
+                json={"budget_kyat": 2_100_000},
+                headers=headers(token=token, if_match=budget_weak),
+            )
+            assert budget_stale_weak.status_code == 412
+
+            budget_delete_missing = await client.request(
+                "DELETE",
+                f"/api/v1/trips/{budget_trip_id}/budgets/{budget_id}",
+                headers=headers(
+                    token=token,
+                    idem=new_key("weak-delete-budget"),
+                ),
+            )
+            assert budget_delete_missing.status_code == 428
+
+            budget_delete_stale = await client.request(
+                "DELETE",
+                f"/api/v1/trips/{budget_trip_id}/budgets/{budget_id}",
+                headers=headers(
+                    token=token,
+                    idem=new_key("weak-delete-budget-stale"),
+                    if_match='W/"99"',
+                ),
+            )
+            assert budget_delete_stale.status_code == 412
+
+            budget_deleted = await client.request(
+                "DELETE",
+                f"/api/v1/trips/{budget_trip_id}/budgets/{budget_id}",
+                headers=headers(
+                    token=token,
+                    idem=new_key("weak-delete-budget-ok"),
+                    if_match=updated_budget_weak,
+                ),
+            )
+            assert budget_deleted.status_code == 204, budget_deleted.text
+            deleted_budget = await read_budget(
+                client,
+                token,
+                budget_trip_id,
+                budget_id,
+            )
+            assert deleted_budget.status_code == 404
+
+            # Spending PATCH and DELETE.
+            spending_trip = await create_trip(
+                client,
+                token,
+                trip_payload(name="Spending trip"),
+            )
+            spending_trip_id = spending_trip.json()["data"]["id"]
+            spending = await create_spending(
+                client,
+                token,
+                spending_trip_id,
+                spending_payload(),
+            )
+            assert spending.status_code == 201, spending.text
+            spending_id = spending.json()["data"]["id"]
+            spending_weak = f'W/{spending.headers["etag"]}'
+
+            spending_missing = await client.patch(
+                f"/api/v1/trips/{spending_trip_id}/spending/{spending_id}",
+                json={"amount_kyat": 500_000},
+                headers=headers(token=token),
+            )
+            assert spending_missing.status_code == 428
+
+            spending_stale = await client.patch(
+                f"/api/v1/trips/{spending_trip_id}/spending/{spending_id}",
+                json={"amount_kyat": 500_000},
+                headers=headers(token=token, if_match='W/"99"'),
+            )
+            assert spending_stale.status_code == 412
+
+            for malformed in malformed_tags:
+                response = await client.patch(
+                    f"/api/v1/trips/{spending_trip_id}/spending/{spending_id}",
+                    json={"amount_kyat": 500_000},
+                    headers=headers(token=token, if_match=malformed),
+                )
+                assert response.status_code == 412, (malformed, response.text)
+
+            spending_updated = await client.patch(
+                f"/api/v1/trips/{spending_trip_id}/spending/{spending_id}",
+                json={
+                    "description": "Weakly updated",
+                    "amount_kyat": 500_000,
+                },
+                headers=headers(token=token, if_match=spending_weak),
+            )
+            assert spending_updated.status_code == 200, spending_updated.text
+            assert spending_updated.json()["data"]["description"] == (
+                "Weakly updated"
+            )
+            assert spending_updated.json()["data"]["amount_kyat"] == 500_000
+            assert spending_updated.headers["etag"] == '"2"'
+            updated_spending_weak = f'W/{spending_updated.headers["etag"]}'
+
+            spending_stale_weak = await client.patch(
+                f"/api/v1/trips/{spending_trip_id}/spending/{spending_id}",
+                json={"amount_kyat": 550_000},
+                headers=headers(token=token, if_match=spending_weak),
+            )
+            assert spending_stale_weak.status_code == 412
+
+            spending_delete_missing = await client.request(
+                "DELETE",
+                f"/api/v1/trips/{spending_trip_id}/spending/{spending_id}",
+                headers=headers(
+                    token=token,
+                    idem=new_key("weak-delete-spending"),
+                ),
+            )
+            assert spending_delete_missing.status_code == 428
+
+            spending_delete_stale = await client.request(
+                "DELETE",
+                f"/api/v1/trips/{spending_trip_id}/spending/{spending_id}",
+                headers=headers(
+                    token=token,
+                    idem=new_key("weak-delete-spending-stale"),
+                    if_match='W/"99"',
+                ),
+            )
+            assert spending_delete_stale.status_code == 412
+
+            spending_deleted = await client.request(
+                "DELETE",
+                f"/api/v1/trips/{spending_trip_id}/spending/{spending_id}",
+                headers=headers(
+                    token=token,
+                    idem=new_key("weak-delete-spending-ok"),
+                    if_match=updated_spending_weak,
+                ),
+            )
+            assert spending_deleted.status_code == 204, spending_deleted.text
+            deleted_spending = await read_spending(
+                client,
+                token,
+                spending_trip_id,
+                spending_id,
+            )
+            assert deleted_spending.status_code == 404
+
+    asyncio.run(scenario())
+
+
 def test_import_does_not_duplicate_accounting(tx_env: TransactionEnv):
     async def scenario() -> None:
         async with tx_env.client() as client:

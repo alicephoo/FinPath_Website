@@ -79,7 +79,9 @@ function matchesIntendedSettings(
     && settings.effective_date === intended.effective_date
 }
 
-const SETTINGS_ETAG_REVISION = /^"([0-9]+)"$/
+// The Pages edge may weaken the server's strong ETag to W/"N". It still carries
+// the same numeric revision, so parse both forms to keep ordering numeric.
+const SETTINGS_ETAG_REVISION = /^(?:W\/)?"([0-9]+)"$/
 
 function settingsRevision(etag: string | null): number | null {
   if (etag === null) return null

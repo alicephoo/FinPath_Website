@@ -27,7 +27,11 @@ from app.services.transactions import (
 
 JSON_SAFE_INTEGER_MAX = 9_007_199_254_740_991
 
-_IF_MATCH_PATTERN = re.compile(r'^"([0-9]+)"$')
+# ETags are numeric revision tokens. The canonical form emitted by this API is
+# the strong tag "N", but an intermediary such as the Cloudflare Pages edge may
+# weaken it to W/"N" in transit while preserving the revision. Accept both
+# forms; the revision comparison below remains an exact numeric equality check.
+_IF_MATCH_PATTERN = re.compile(r'^(?:W/)?"([0-9]+)"$')
 
 
 @dataclass(frozen=True)

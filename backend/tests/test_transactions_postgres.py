@@ -651,6 +651,117 @@ def test_update_partial_and_full_with_revision_preconditions(tx_env: Transaction
     asyncio.run(scenario())
 
 
+def test_write_endpoints_accept_weak_if_match_revision_tokens(
+    tx_env: TransactionEnv,
+):
+    groceries = category_id(tx_env, "expense", "Groceries")
+
+    async def scenario() -> None:
+        async with tx_env.client() as client:
+            _, session = await register_verify_login(client, tx_env)
+            token = session["access_token"]
+            created = await create_transaction(
+                client,
+                token,
+                transaction_payload(groceries, description="Weak update"),
+            )
+            assert created.status_code == 201, created.text
+            transaction_id = created.json()["data"]["id"]
+            weak_etag = f'W/{created.headers["etag"]}'
+
+            missing = await client.patch(
+                f"/api/v1/transactions/{transaction_id}",
+                json={"description": "Missing"},
+                headers=headers(token=token),
+            )
+            assert missing.status_code == 428
+            assert missing.json()["error"]["code"] == "precondition_required"
+
+            stale = await client.patch(
+                f"/api/v1/transactions/{transaction_id}",
+                json={"description": "Stale"},
+                headers=headers(token=token, if_match='W/"99"'),
+            )
+            assert stale.status_code == 412
+            assert stale.json()["error"]["code"] == "stale_revision"
+
+            for malformed in (
+                'W/"not-a-revision"',
+                "W/1",
+                'w/"1"',
+                'W/"1", "2"',
+                'W/"',
+            ):
+                response = await client.patch(
+                    f"/api/v1/transactions/{transaction_id}",
+                    json={"description": "Malformed"},
+                    headers=headers(token=token, if_match=malformed),
+                )
+                assert response.status_code == 412, (malformed, response.text)
+
+            updated = await client.patch(
+                f"/api/v1/transactions/{transaction_id}",
+                json={"description": "Weakly updated"},
+                headers=headers(token=token, if_match=weak_etag),
+            )
+            assert updated.status_code == 200, updated.text
+            assert updated.json()["data"]["description"] == "Weakly updated"
+            assert updated.headers["etag"] == '"2"'
+
+            row = _db_transaction(tx_env, transaction_id)
+            assert row is not None
+            assert row["description"] == "Weakly updated"
+            assert row["revision"] == 2
+
+            stale_weak = await client.patch(
+                f"/api/v1/transactions/{transaction_id}",
+                json={"description": "Stale weak"},
+                headers=headers(token=token, if_match=weak_etag),
+            )
+            assert stale_weak.status_code == 412
+            assert stale_weak.json()["error"]["code"] == "stale_revision"
+
+            delete_created = await create_transaction(
+                client,
+                token,
+                transaction_payload(groceries, description="Weak delete"),
+            )
+            assert delete_created.status_code == 201, delete_created.text
+            delete_id = delete_created.json()["data"]["id"]
+            delete_weak = f'W/{delete_created.headers["etag"]}'
+
+            delete_missing = await client.delete(
+                f"/api/v1/transactions/{delete_id}",
+                headers=headers(token=token, idem=new_key("weak-delete")),
+            )
+            assert delete_missing.status_code == 428
+            assert _db_transaction(tx_env, delete_id) is not None
+
+            delete_stale = await client.delete(
+                f"/api/v1/transactions/{delete_id}",
+                headers=headers(
+                    token=token,
+                    idem=new_key("weak-delete-stale"),
+                    if_match='W/"99"',
+                ),
+            )
+            assert delete_stale.status_code == 412
+            assert _db_transaction(tx_env, delete_id) is not None
+
+            deleted = await client.delete(
+                f"/api/v1/transactions/{delete_id}",
+                headers=headers(
+                    token=token,
+                    idem=new_key("weak-delete-ok"),
+                    if_match=delete_weak,
+                ),
+            )
+            assert deleted.status_code == 204, deleted.text
+            assert _db_transaction(tx_env, delete_id) is None
+
+    asyncio.run(scenario())
+
+
 def test_update_rejects_invalid_values_and_leaves_data_unchanged(tx_env: TransactionEnv):
     groceries = category_id(tx_env, "expense", "Groceries")
     salary = category_id(tx_env, "income", "Salary")

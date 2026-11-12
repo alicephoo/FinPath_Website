@@ -563,6 +563,124 @@ describe('DashboardReports starting balance saves', () => {
     })
   })
 
+  it('saves a first-time balance using the weak ETag delivered by the edge', async () => {
+    const updated = settingsFixture({
+      starting_balance_kyat: 800_000,
+      effective_date: '2026-11-01',
+      amount_kyat: 800_000,
+    })
+    mocks.fetchFinancialSettings
+      .mockResolvedValueOnce({
+        settings: notConfiguredSettings(),
+        etag: 'W/"1"',
+      })
+      .mockResolvedValueOnce({ settings: updated, etag: 'W/"2"' })
+    mocks.fetchDashboardOverview
+      .mockResolvedValueOnce(overviewFixture({
+        account_balance: notConfiguredBalance(),
+      }))
+      .mockResolvedValueOnce(overviewFixture({
+        account_balance: balanceFixture({
+          starting_balance_kyat: 800_000,
+          effective_date: '2026-11-01',
+          amount_kyat: 800_000,
+        }),
+      }))
+    mocks.updateFinancialSettings.mockResolvedValue({
+      settings: updated,
+      etag: 'W/"2"',
+    })
+
+    await renderLoaded()
+
+    const form = document.querySelector('.account-balance-form') as HTMLFormElement
+    expect(form).toBeInTheDocument()
+    fillBalanceForm(form, '800000', '2026-11-01')
+    fireEvent.click(within(form).getByRole('button', {
+      name: 'Set starting balance',
+    }))
+
+    await waitFor(() => {
+      expect(mocks.updateFinancialSettings).toHaveBeenCalledWith(
+        'access-token-1',
+        {
+          starting_balance_kyat: 800_000,
+          effective_date: '2026-11-01',
+        },
+        'W/"1"',
+      )
+    })
+    await waitFor(() => {
+      expect(mocks.fetchDashboardOverview).toHaveBeenCalledTimes(2)
+    })
+    await waitFor(() => {
+      expect(within(accountBalanceCard())
+        .getAllByText(formatMoney(800_000)).length).toBeGreaterThan(0)
+    })
+  })
+
+  it('retries a 401 with the same captured ETag without re-reading settings', async () => {
+    await renderLoaded()
+
+    const updated = settingsFixture({
+      starting_balance_kyat: 1_234_567,
+      effective_date: '2026-11-05',
+      amount_kyat: 1_234_567,
+    })
+    const saved = deferred<{ settings: FinancialSettings; etag: string }>()
+    mocks.updateFinancialSettings
+      .mockRejectedValueOnce(new ApiError({
+        status: 401,
+        code: 'authentication_required',
+        message: 'Authentication is required.',
+      }))
+      .mockReturnValueOnce(saved.promise)
+    mocks.authorizedRequest.mockImplementation(async (
+      request: (accessToken: string) => Promise<unknown>,
+    ) => {
+      try {
+        return await request('access-token-1')
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 401) {
+          return request('access-token-2')
+        }
+        throw error
+      }
+    })
+
+    const form = openEditForm()
+    fillBalanceForm(form, '1234567', '2026-11-05')
+    fireEvent.click(within(form).getByRole('button', {
+      name: 'Save starting balance',
+    }))
+
+    await waitFor(() => {
+      expect(mocks.updateFinancialSettings).toHaveBeenCalledTimes(2)
+    })
+    expect(mocks.updateFinancialSettings).toHaveBeenNthCalledWith(
+      1,
+      'access-token-1',
+      {
+        starting_balance_kyat: 1_234_567,
+        effective_date: '2026-11-05',
+      },
+      '"3"',
+    )
+    expect(mocks.updateFinancialSettings).toHaveBeenNthCalledWith(
+      2,
+      'access-token-2',
+      {
+        starting_balance_kyat: 1_234_567,
+        effective_date: '2026-11-05',
+      },
+      '"3"',
+    )
+    // The retry reuses the captured revision; it must not resync first.
+    expect(mocks.fetchFinancialSettings).toHaveBeenCalledTimes(1)
+
+    saved.resolve({ settings: updated, etag: '"4"' })
+  })
+
   it('rejects a decimal starting balance without calling the API', async () => {
     await renderLoaded()
     const form = openEditForm()
@@ -1493,13 +1611,18 @@ describe('shouldReplaceSettingsEtag', () => {
     expect(shouldReplaceSettingsEtag('"3"', null)).toBe(false)
   })
 
-  it('keeps a numeric revision when the incoming ETag is non-numeric', () => {
-    expect(shouldReplaceSettingsEtag('"3"', 'W/"4"')).toBe(false)
-    expect(shouldReplaceSettingsEtag('"3"', '"not-a-revision"')).toBe(false)
+  it('treats weak and strong tags as the same numeric revision', () => {
+    expect(shouldReplaceSettingsEtag('"3"', 'W/"4"')).toBe(true)
+    expect(shouldReplaceSettingsEtag('W/"3"', '"4"')).toBe(true)
+    expect(shouldReplaceSettingsEtag('W/"3"', 'W/"3"')).toBe(true)
+    expect(shouldReplaceSettingsEtag('W/"3"', 'W/"4"')).toBe(true)
+    expect(shouldReplaceSettingsEtag('W/"4"', 'W/"3"')).toBe(false)
   })
 
-  it('accepts a numeric revision over a non-numeric one', () => {
-    expect(shouldReplaceSettingsEtag('W/"3"', '"4"')).toBe(true)
+  it('keeps a numeric revision when the incoming ETag is malformed', () => {
+    expect(shouldReplaceSettingsEtag('"3"', '"not-a-revision"')).toBe(false)
+    expect(shouldReplaceSettingsEtag('"3"', 'W/not-a-revision')).toBe(false)
+    expect(shouldReplaceSettingsEtag('"3"', '3')).toBe(false)
   })
 
   it('accepts equal and newer revisions', () => {
@@ -1511,9 +1634,9 @@ describe('shouldReplaceSettingsEtag', () => {
     expect(shouldReplaceSettingsEtag('"4"', '"3"')).toBe(false)
   })
 
-  it('compares non-numeric ETags when no revision is known', () => {
-    expect(shouldReplaceSettingsEtag('W/"3"', 'W/"3"')).toBe(false)
-    expect(shouldReplaceSettingsEtag('W/"3"', 'W/"4"')).toBe(true)
+  it('compares unrecognized ETags only when no numeric revision is known', () => {
+    expect(shouldReplaceSettingsEtag('"x"', '"x"')).toBe(false)
+    expect(shouldReplaceSettingsEtag('"x"', '"y"')).toBe(true)
   })
 })
 

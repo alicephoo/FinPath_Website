@@ -30,7 +30,9 @@ from app.services.idempotency import IdempotencyResult, run_idempotent
 
 JSON_SAFE_INTEGER_MAX = 9_007_199_254_740_991
 
-_IF_MATCH_PATTERN = re.compile(r'^"([0-9]+)"$')
+# The Pages edge may weaken the server's strong ETag to W/"N" in transit
+# while preserving the revision. Accept both forms and compare numerically.
+_IF_MATCH_PATTERN = re.compile(r'^(?:W/)?"([0-9]+)"$')
 
 _LOAN_SELECT = """
 SELECT l.id, l.name, l.principal_kyat, l.start_date, l.created_at,

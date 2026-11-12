@@ -405,6 +405,75 @@ def test_update_goal_uses_revision_preconditions_and_preserves_balance(
     asyncio.run(scenario())
 
 
+def test_update_goal_accepts_weak_if_match_revision_tokens(
+    tx_env: TransactionEnv,
+):
+    async def scenario() -> None:
+        async with tx_env.client() as client:
+            _, session = await register_verify_login(client, tx_env)
+            token = session["access_token"]
+            created = await create_goal(client, token, goal_payload())
+            assert created.status_code == 201, created.text
+            goal_id = created.json()["data"]["id"]
+            weak_etag = f'W/{created.headers["etag"]}'
+
+            missing = await client.patch(
+                f"/api/v1/savings/goals/{goal_id}",
+                json={"name": "Missing"},
+                headers=headers(token=token),
+            )
+            assert missing.status_code == 428
+            assert missing.json()["error"]["code"] == "precondition_required"
+
+            stale = await client.patch(
+                f"/api/v1/savings/goals/{goal_id}",
+                json={"name": "Stale"},
+                headers=headers(token=token, if_match='W/"99"'),
+            )
+            assert stale.status_code == 412
+            assert stale.json()["error"]["code"] == "stale_revision"
+
+            for malformed in (
+                'W/"not-a-revision"',
+                "W/1",
+                'w/"1"',
+                'W/"1", "2"',
+                'W/"',
+            ):
+                response = await client.patch(
+                    f"/api/v1/savings/goals/{goal_id}",
+                    json={"name": "Malformed"},
+                    headers=headers(token=token, if_match=malformed),
+                )
+                assert response.status_code == 412, (malformed, response.text)
+
+            updated = await client.patch(
+                f"/api/v1/savings/goals/{goal_id}",
+                json={"name": "Weakly updated", "target_kyat": 300_000},
+                headers=headers(token=token, if_match=weak_etag),
+            )
+            assert updated.status_code == 200, updated.text
+            assert updated.json()["data"]["name"] == "Weakly updated"
+            assert updated.json()["data"]["target_kyat"] == 300_000
+            assert updated.headers["etag"] == '"2"'
+
+            row = _db_goal(tx_env, goal_id)
+            assert row is not None
+            assert row["name"] == "Weakly updated"
+            assert row["target_kyat"] == 300_000
+            assert row["revision"] == 2
+
+            stale_weak = await client.patch(
+                f"/api/v1/savings/goals/{goal_id}",
+                json={"name": "Stale weak"},
+                headers=headers(token=token, if_match=weak_etag),
+            )
+            assert stale_weak.status_code == 412
+            assert stale_weak.json()["error"]["code"] == "stale_revision"
+
+    asyncio.run(scenario())
+
+
 def test_contributions_update_derived_balance_and_validate_amounts(
     tx_env: TransactionEnv,
 ):

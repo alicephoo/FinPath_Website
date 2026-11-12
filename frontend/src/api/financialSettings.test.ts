@@ -110,6 +110,37 @@ describe('financial settings API', () => {
     expect(result.etag).toBe('"4"')
   })
 
+  it('round-trips a weak ETag from the Pages edge without rewriting it', async () => {
+    const initial: FinancialSettings = {
+      status: 'not_configured',
+      starting_balance_kyat: null,
+      effective_date: null,
+      amount_kyat: null,
+      as_of_date: '2026-11-12',
+    }
+    fetchMock.mockResolvedValueOnce(jsonResponse(
+      { data: initial },
+      { headers: { ETag: 'W/"1"' } },
+    ))
+
+    const loaded = await fetchFinancialSettings('access-token-1')
+    expect(loaded.etag).toBe('W/"1"')
+
+    fetchMock.mockResolvedValueOnce(jsonResponse(
+      { data: configuredSettings },
+      { headers: { ETag: 'W/"2"' } },
+    ))
+
+    const saved = await updateFinancialSettings(
+      'access-token-1',
+      { starting_balance_kyat: 800_000, effective_date: '2026-11-01' },
+      loaded.etag as string,
+    )
+
+    expect(requestHeaders(1).get('If-Match')).toBe('W/"1"')
+    expect(saved.etag).toBe('W/"2"')
+  })
+
   it('clears both fields together when both are null', async () => {
     const cleared: FinancialSettings = {
       status: 'not_configured',

@@ -42,7 +42,9 @@ JOIN transaction_categories AS c ON c.id = t.category_id
 """
 
 _DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_IF_MATCH_PATTERN = re.compile(r'^"([0-9]+)"$')
+# The Pages edge may weaken the server's strong ETag to W/"N" in transit
+# while preserving the revision. Accept both forms and compare numerically.
+_IF_MATCH_PATTERN = re.compile(r'^(?:W/)?"([0-9]+)"$')
 
 
 @dataclass(frozen=True)
