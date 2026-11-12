@@ -321,11 +321,12 @@ def test_dashboard_summaries_recent_transactions_and_ownership(
             # + 50,000 income - 20,000 expense
             # + 100,000 car-loan proceeds - 10,000 car-loan repayment
             # + 50,000 paid-loan proceeds - 50,000 paid-loan repayment
-            assert balance["amount_kyat"] == 220_000
+            # - 150,000 savings allocations (100,000 + 50,000 targets)
+            assert balance["amount_kyat"] == 70_000
             assert balance["as_of_date"] == TODAY.isoformat()
 
             # All-time transaction totals include every transaction but no
-            # loan repayment or savings contribution.
+            # loan repayment or savings allocation/contribution.
             assert data["all_time_income_kyat"] == 1_049_999
             assert data["all_time_expense_kyat"] == 21_000
             assert data["travel_expense_kyat"] == 0
@@ -376,8 +377,9 @@ def test_dashboard_summaries_recent_transactions_and_ownership(
             assert second_response.status_code == 200
             second_data = second_response.json()["data"]
             assert second_data["account_balance"]["status"] == "configured"
-            # 5,000 starting + 777,777 income + 200,000 loan proceeds.
-            assert second_data["account_balance"]["amount_kyat"] == 982_777
+            # 5,000 starting + 777,777 income + 200,000 loan proceeds
+            # - 40,000 savings allocation target.
+            assert second_data["account_balance"]["amount_kyat"] == 942_777
             assert second_data["all_time_income_kyat"] == 777_777
             assert second_data["all_time_expense_kyat"] == 0
             assert second_data["outstanding_loan_principal_kyat"] == 200_000

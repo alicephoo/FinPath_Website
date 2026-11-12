@@ -4,13 +4,25 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
+from uuid import UUID
 
+from sqlalchemy.orm import Session
+
+from app.services.transactions import calculate_account_balance
 from tests.tx_support import (
     TransactionEnv,
     headers,
     new_key,
     register_verify_login,
+    set_starting_balance,
 )
+
+
+def _balance(tx_env: TransactionEnv, user_id: str) -> int | None:
+    with Session(tx_env.runtime_engine) as session:
+        return calculate_account_balance(
+            session, user_id=UUID(user_id), as_of_date=None
+        ).amount_kyat
 
 
 def goal_payload(
@@ -1000,5 +1012,271 @@ def test_withdrawal_validation_ownership_and_idempotency(
                 {"id": user_id, "goal_id": goal_id},
             )
             assert persisted is not None and persisted["count"] == 2
+
+    asyncio.run(scenario())
+
+
+def test_savings_allocation_deducts_once_and_tracks_targets_and_withdrawals(
+    tx_env: TransactionEnv,
+):
+    async def scenario() -> None:
+        async with tx_env.client() as client:
+            _, session = await register_verify_login(client, tx_env)
+            token = session["access_token"]
+            user_id = session["user"]["id"]
+            set_starting_balance(
+                tx_env,
+                user_id=user_id,
+                starting_balance_kyat=1_000_000,
+                effective_date="2026-01-01",
+            )
+            assert _balance(tx_env, user_id) == 1_000_000
+
+            created = await create_goal(
+                client,
+                token,
+                goal_payload(target_kyat=300_000),
+            )
+            assert created.status_code == 201, created.text
+            goal_id = created.json()["data"]["id"]
+            # The allocation is reserved immediately.
+            assert _balance(tx_env, user_id) == 700_000
+
+            first = await create_contribution(
+                client,
+                token,
+                goal_id,
+                contribution_payload(amount_kyat=100_000),
+            )
+            assert first.status_code == 201, first.text
+            # A contribution inside the allocation moves already-reserved cash
+            # and must not deduct it a second time.
+            assert _balance(tx_env, user_id) == 700_000
+
+            excess = await create_contribution(
+                client,
+                token,
+                goal_id,
+                contribution_payload(amount_kyat=250_000),
+            )
+            assert excess.status_code == 201, excess.text
+            # Contributions now total 350,000, so only the 50,000 above the
+            # 300,000 target is an additional reservation.
+            assert _balance(tx_env, user_id) == 650_000
+
+            current = await client.get(
+                f"/api/v1/savings/goals/{goal_id}",
+                headers=headers(token=token),
+            )
+            increased = await client.patch(
+                f"/api/v1/savings/goals/{goal_id}",
+                json={"target_kyat": 500_000},
+                headers=headers(
+                    token=token,
+                    if_match=current.headers["etag"],
+                ),
+            )
+            assert increased.status_code == 200, increased.text
+            # Increasing the target by 200,000 reserves exactly the difference.
+            assert _balance(tx_env, user_id) == 500_000
+            assert increased.headers["etag"] == '"4"'
+
+            decreased = await client.patch(
+                f"/api/v1/savings/goals/{goal_id}",
+                json={"target_kyat": 400_000},
+                headers=headers(token=token, if_match='"4"'),
+            )
+            assert decreased.status_code == 200, decreased.text
+            # Decreasing the target by 100,000 releases exactly the difference.
+            assert _balance(tx_env, user_id) == 600_000
+
+            withdrawn = await create_withdrawal(
+                client,
+                token,
+                goal_id,
+                contribution_payload(amount_kyat=50_000),
+            )
+            assert withdrawn.status_code == 201, withdrawn.text
+            # Withdrawing returns cash to the available balance.
+            assert _balance(tx_env, user_id) == 650_000
+
+            current = await client.get(
+                f"/api/v1/savings/goals/{goal_id}",
+                headers=headers(token=token),
+            )
+            archived = await client.post(
+                f"/api/v1/savings/goals/{goal_id}/archive",
+                json={"confirm": True},
+                headers=headers(
+                    token=token,
+                    idem=new_key("archive"),
+                    if_match=current.headers["etag"],
+                ),
+            )
+            assert archived.status_code == 200, archived.text
+            assert archived.json()["data"]["status"] == "archived"
+            # Active target 400,000 with 350,000 contributed and 50,000
+            # withdrawn reserved 350,000. Archiving releases the unused 50,000
+            # but keeps the 300,000 actual balance reserved.
+            assert _balance(tx_env, user_id) == 700_000
+
+            restored = await client.post(
+                f"/api/v1/savings/goals/{goal_id}/restore",
+                json={"confirm": True},
+                headers=headers(
+                    token=token,
+                    idem=new_key("restore"),
+                    if_match=archived.headers["etag"],
+                ),
+            )
+            assert restored.status_code == 200, restored.text
+            assert restored.json()["data"]["status"] == "active"
+            assert _balance(tx_env, user_id) == 650_000
+
+    asyncio.run(scenario())
+
+
+def test_archive_and_restore_require_confirmation_revision_and_idempotency(
+    tx_env: TransactionEnv,
+):
+    async def scenario() -> None:
+        async with tx_env.client() as client:
+            _, first = await register_verify_login(client, tx_env)
+            _, second = await register_verify_login(client, tx_env)
+            token = first["access_token"]
+            other_token = second["access_token"]
+
+            created = await create_goal(client, token, goal_payload())
+            assert created.status_code == 201, created.text
+            goal_id = created.json()["data"]["id"]
+
+            unconfirmed = await client.post(
+                f"/api/v1/savings/goals/{goal_id}/archive",
+                json={"confirm": False},
+                headers=headers(
+                    token=token,
+                    idem=new_key("archive"),
+                    if_match='"1"',
+                ),
+            )
+            assert unconfirmed.status_code == 422
+            assert unconfirmed.json()["error"]["code"] == (
+                "confirmation_required"
+            )
+
+            missing_match = await client.post(
+                f"/api/v1/savings/goals/{goal_id}/archive",
+                json={"confirm": True},
+                headers=headers(token=token, idem=new_key("archive")),
+            )
+            assert missing_match.status_code == 428
+            assert missing_match.json()["error"]["code"] == (
+                "precondition_required"
+            )
+
+            stale = await client.post(
+                f"/api/v1/savings/goals/{goal_id}/archive",
+                json={"confirm": True},
+                headers=headers(
+                    token=token,
+                    idem=new_key("archive"),
+                    if_match='"99"',
+                ),
+            )
+            assert stale.status_code == 412
+            assert stale.json()["error"]["code"] == "stale_revision"
+
+            hidden = await client.post(
+                f"/api/v1/savings/goals/{goal_id}/archive",
+                json={"confirm": True},
+                headers=headers(
+                    token=other_token,
+                    idem=new_key("archive"),
+                    if_match='"1"',
+                ),
+            )
+            assert hidden.status_code == 404
+
+            key = new_key("archive")
+            archived = await client.post(
+                f"/api/v1/savings/goals/{goal_id}/archive",
+                json={"confirm": True},
+                headers=headers(
+                    token=token,
+                    idem=key,
+                    if_match='"1"',
+                ),
+            )
+            assert archived.status_code == 200, archived.text
+            assert archived.json()["data"]["status"] == "archived"
+            assert archived.headers["etag"] == '"2"'
+
+            replay = await client.post(
+                f"/api/v1/savings/goals/{goal_id}/archive",
+                json={"confirm": True},
+                headers=headers(token=token, idem=key, if_match='"1"'),
+            )
+            assert replay.status_code == 200
+            assert replay.headers["etag"] == '"2"'
+            assert replay.json() == archived.json()
+
+            no_op = await client.post(
+                f"/api/v1/savings/goals/{goal_id}/archive",
+                json={"confirm": True},
+                headers=headers(
+                    token=token,
+                    idem=new_key("archive"),
+                    if_match='"2"',
+                ),
+            )
+            assert no_op.status_code == 200
+            assert no_op.headers["etag"] == '"2"'
+
+            active = await client.get(
+                "/api/v1/savings/goals",
+                headers=headers(token=token),
+            )
+            assert active.json()["data"] == []
+            archived_list = await client.get(
+                "/api/v1/savings/goals?status=archived",
+                headers=headers(token=token),
+            )
+            assert [item["id"] for item in archived_list.json()["data"]] == [
+                goal_id
+            ]
+
+            restored = await client.post(
+                f"/api/v1/savings/goals/{goal_id}/restore",
+                json={"confirm": True},
+                headers=headers(
+                    token=token,
+                    idem=new_key("restore"),
+                    if_match='W/"2"',
+                ),
+            )
+            assert restored.status_code == 200, restored.text
+            assert restored.json()["data"]["status"] == "active"
+            assert restored.headers["etag"] == '"3"'
+
+            restored_no_op = await client.post(
+                f"/api/v1/savings/goals/{goal_id}/restore",
+                json={"confirm": True},
+                headers=headers(
+                    token=token,
+                    idem=new_key("restore"),
+                    if_match='"3"',
+                ),
+            )
+            assert restored_no_op.status_code == 200
+            assert restored_no_op.headers["etag"] == '"3"'
+
+            row = tx_env.one(
+                "SELECT status, archived_at FROM savings_goals "
+                "WHERE id = :id",
+                {"id": goal_id},
+            )
+            assert row is not None
+            assert row["status"] == "active"
+            assert row["archived_at"] is None
 
     asyncio.run(scenario())

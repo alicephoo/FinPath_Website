@@ -99,6 +99,12 @@ class SavingsGoalUpdateRequest(_StrictModel):
         return self
 
 
+class SavingsGoalArchiveRequest(_StrictModel):
+    """Archive/restore requires an explicit confirmation flag."""
+
+    confirm: bool = Field(default=False, strict=True)
+
+
 class SavingsContributionCreateRequest(_StrictModel):
     amount_kyat: int = Field(strict=True)
     entry_date: date

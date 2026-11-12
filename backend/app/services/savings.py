@@ -21,6 +21,7 @@ from app.api.errors import ApiError
 from app.core.config import settings
 from app.schemas.savings import (
     SavingsContributionCreateRequest,
+    SavingsGoalArchiveRequest,
     SavingsGoalCreateRequest,
     SavingsGoalStatusFilter,
     SavingsGoalUpdateRequest,
@@ -308,6 +309,79 @@ def _actual_balance(
     return Decimal(row["total"])
 
 
+def calculate_recognized_savings_allocation(
+    session: Session,
+    *,
+    user_id: UUID,
+) -> int:
+    """Return the savings amount reserved from the available balance.
+
+    ``savings_goals.target_kyat`` is the allocation, not an expense. Creating
+    or increasing a target reserves cash immediately; contributions move cash
+    inside an already-reserved bucket and therefore do not deduct it again.
+    Contributions above the target are new reservations and add only the
+    excess. Withdrawals return cash to the available balance. A target
+    reduction releases only the un-contributed remainder; it cannot return cash
+    already recorded as actual savings. Archiving or cancelling a goal releases
+    the un-contributed remainder ``max(0, target - actual)`` while the actual
+    savings balance stays reserved; the goal can be restored to reserve that
+    remainder again.
+
+    Equivalently, an active goal reserves
+    ``max(target, contributions) - withdrawals`` and an archived goal reserves
+    its actual balance ``contributions - withdrawals``. The aggregate is
+    checked before it is returned. Like recognized travel, this allocation
+    layer is intentionally not filtered by the financial-settings effective
+    date; the target is current state rather than a dated cash movement.
+    """
+    row = session.execute(
+        text(
+            """
+            SELECT COALESCE(SUM(
+                CASE
+                    WHEN totals.status = 'active'
+                        THEN GREATEST(
+                            totals.target_kyat,
+                            totals.contributed_kyat
+                        ) - totals.withdrawn_kyat
+                    ELSE GREATEST(
+                        totals.contributed_kyat - totals.withdrawn_kyat,
+                        0
+                    )
+                END
+            ), 0) AS recognized
+            FROM (
+                SELECT
+                    g.id,
+                    g.status,
+                    g.target_kyat::numeric AS target_kyat,
+                    COALESCE((
+                        SELECT SUM(e.amount_kyat::numeric)
+                        FROM savings_entries AS e
+                        WHERE e.goal_id = g.id
+                          AND e.user_id = g.user_id
+                          AND e.entry_type = 'contribution'
+                    ), 0) AS contributed_kyat,
+                    COALESCE((
+                        SELECT SUM(e.amount_kyat::numeric)
+                        FROM savings_entries AS e
+                        WHERE e.goal_id = g.id
+                          AND e.user_id = g.user_id
+                          AND e.entry_type = 'withdrawal'
+                    ), 0) AS withdrawn_kyat
+                FROM savings_goals AS g
+                WHERE g.user_id = :user_id
+            ) AS totals
+            """
+        ),
+        {"user_id": user_id},
+    ).mappings().one()
+    return _safe_int(
+        Decimal(row["recognized"]),
+        label="recognized savings allocation",
+    )
+
+
 def _goal_row_for_user(
     session: Session,
     *,
@@ -446,6 +520,169 @@ def get_goal(
     return SavingsGoalView(
         body={"data": _goal_resource(row)},
         etag=_etag(int(row["revision"])),
+    )
+
+
+def _set_goal_archive_state(
+    session: Session,
+    *,
+    context: AuthContext,
+    goal_id: UUID,
+    payload: SavingsGoalArchiveRequest,
+    if_match: str | None,
+    idempotency_key: str,
+    archived: bool,
+) -> IdempotencyResult:
+    request_payload = payload.model_dump(mode="json")
+    action = "archive" if archived else "restore"
+    target_status = "archived" if archived else "active"
+
+    def operation() -> IdempotencyResult:
+        if not payload.confirm:
+            raise ApiError(
+                422,
+                "confirmation_required",
+                f"Confirm that you want to {action} this savings goal.",
+                field_errors=[
+                    _field_error(
+                        "confirm",
+                        "confirmation_required",
+                        "Set confirm to true to continue.",
+                    )
+                ],
+            )
+
+        expected_revision = _parse_if_match(if_match)
+        row = _goal_row_for_user(
+            session,
+            user_id=context.user_id,
+            goal_id=goal_id,
+            for_update=True,
+        )
+        if row is None:
+            raise _not_found()
+        if int(row["revision"]) != expected_revision:
+            raise ApiError(
+                412,
+                "stale_revision",
+                "The supplied revision does not match the current savings goal.",
+            )
+
+        if row["status"] == target_status:
+            # Repeating a successful archive/restore with a new key is a no-op
+            # rather than a second revision bump.
+            updated_at = row["updated_at"]
+            revision = int(row["revision"])
+        else:
+            updated = session.execute(
+                text(
+                    """
+                    UPDATE savings_goals
+                    SET status = :status,
+                        archived_at = CASE
+                            WHEN :archived THEN now()
+                            ELSE NULL
+                        END,
+                        updated_at = now(),
+                        revision = revision + 1
+                    WHERE id = :goal_id
+                      AND user_id = :user_id
+                      AND revision = :expected_revision
+                    RETURNING updated_at, revision
+                    """
+                ),
+                {
+                    "status": target_status,
+                    "archived": archived,
+                    "goal_id": goal_id,
+                    "user_id": context.user_id,
+                    "expected_revision": expected_revision,
+                },
+            ).mappings().first()
+            if updated is None:
+                raise ApiError(
+                    412,
+                    "stale_revision",
+                    "The supplied revision does not match the current savings goal.",
+                )
+            updated_at = updated["updated_at"]
+            revision = int(updated["revision"])
+
+        resource_row = {
+            "id": row["id"],
+            "name": row["name"],
+            "target_kyat": row["target_kyat"],
+            "tone": row["tone"],
+            "status": target_status,
+            "created_at": row["created_at"],
+            "updated_at": updated_at,
+            "revision": revision,
+            "actual_balance": row["actual_balance"],
+        }
+        return IdempotencyResult(
+            status_code=200,
+            body={"data": _goal_resource(resource_row)},
+            headers={"ETag": _etag(revision)},
+        )
+
+    try:
+        result, _ = run_idempotent(
+            session,
+            scope=f"user:{context.user_id}",
+            method="POST",
+            route=f"/api/v1/savings/goals/{goal_id}/{action}",
+            key=idempotency_key,
+            payload=request_payload,
+            owner_user_id=context.user_id,
+            operation=operation,
+        )
+        session.commit()
+    except ApiError:
+        session.rollback()
+        raise
+    except SQLAlchemyError:
+        session.rollback()
+        raise
+    return result
+
+
+def archive_goal(
+    session: Session,
+    *,
+    context: AuthContext,
+    goal_id: UUID,
+    payload: SavingsGoalArchiveRequest,
+    if_match: str | None,
+    idempotency_key: str,
+) -> IdempotencyResult:
+    return _set_goal_archive_state(
+        session,
+        context=context,
+        goal_id=goal_id,
+        payload=payload,
+        if_match=if_match,
+        idempotency_key=idempotency_key,
+        archived=True,
+    )
+
+
+def restore_goal(
+    session: Session,
+    *,
+    context: AuthContext,
+    goal_id: UUID,
+    payload: SavingsGoalArchiveRequest,
+    if_match: str | None,
+    idempotency_key: str,
+) -> IdempotencyResult:
+    return _set_goal_archive_state(
+        session,
+        context=context,
+        goal_id=goal_id,
+        payload=payload,
+        if_match=if_match,
+        idempotency_key=idempotency_key,
+        archived=False,
     )
 
 

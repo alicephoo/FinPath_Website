@@ -385,12 +385,15 @@ transaction listing query, the loan service, the savings service, and the shared
 travel-recognition calculation. Income and expenses remain transaction-only;
 loan repayments and savings contributions are never added to transaction
 expenses. The account balance does include loan cash flow — borrowed principal
-and unreversed repayments — exactly once, while savings contributions remain
-excluded. Recognized travel expense is included once in both
-`total_expense_kyat` and the account balance: an active trip counts the greater
-of its planned budget and actual spending, while completed or cancelled trips
-count actual spending only. A missing starting balance or effective date
-preserves `not_configured` instead of assuming zero, and unsafe aggregate
+and unreversed repayments — exactly once, and subtracts the recognized savings
+allocation once without treating it as an expense. An active goal reserves
+`max(target, contributions) - withdrawals`; contributions within the target do
+not deduct twice, and archiving releases the unused remainder. Recognized travel
+expense is included once in both `total_expense_kyat` and the account balance:
+an active trip counts the greater of its planned budget and actual spending,
+while completed or cancelled trips count actual spending only. A missing
+starting balance or effective date preserves `not_configured` instead of
+assuming zero, and unsafe aggregate
 results return `500 aggregate_out_of_range` rather than truncating. The whole
 response is read in one repeatable-read transaction so it cannot mix pre- and
 post-mutation totals. Six-month cash flow, expense categories, per-trip rows in

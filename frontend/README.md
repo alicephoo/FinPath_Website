@@ -175,8 +175,11 @@ outstanding loan principal, active loan count, recorded loan repayments, actual
 savings balance, combined savings targets, active savings-goal count, and each
 savings goal's progress. Loan repayments and savings entries are separate from
 transaction expenses. The backend-calculated balance includes borrowed loan
-principal and unreversed loan repayments as cash movements; savings entries are
-not included.
+principal and unreversed loan repayments as cash movements, and subtracts the
+recognized savings allocation. An active savings target reserves
+`max(target, contributions) - withdrawals`; contributions inside the target do
+not deduct twice, and archived goals reserve only actual savings. The allocation
+is not an expense and is not added to Dashboard expense totals.
 
 A `not_configured` balance is displayed as **Not configured**, never as
 `0 MMK`. The dashboard shows the backend's calculated balance and does not

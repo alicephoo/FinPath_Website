@@ -804,10 +804,17 @@ def calculate_account_balance(
     effective date. The loan model is borrowing-only: ``loans.start_date`` is
     the date the borrowed cash was received, and each unreversed
     ``loan_repayments`` row is a cash outflow. Loan repayments are not
-    transaction expenses, so they are counted exactly once here. Savings
-    entries remain separate and are excluded. Travel is an allocation layer:
-    each active trip deducts the greater of its planned budget and actual
-    spending, while completed or cancelled trips deduct actual spending only.
+    transaction expenses, so they are counted exactly once here. Travel is an
+    allocation layer: each active trip deducts the greater of its planned
+    budget and actual spending, while completed or cancelled trips deduct
+    actual spending only. Savings follows the same allocation model: an active
+    goal reserves ``max(target, contributions) - withdrawals``, so creating or
+    increasing a target deducts immediately, contributions within the
+    allocation do not deduct twice, and withdrawals return cash. Archived
+    goals reserve only their actual balance, releasing the unused allocation.
+    Neither travel nor savings allocations are date-filtered by the effective
+    date; they represent current reservations rather than dated cash
+    movements.
     """
     report_date = as_of_date or date.today()
     settings_row = session.execute(
@@ -893,9 +900,16 @@ def calculate_account_balance(
             "aggregate_out_of_range",
             "The calculated balance cannot be represented safely.",
         )
+    from app.services.savings import (
+        calculate_recognized_savings_allocation,
+    )
     from app.services.travel import calculate_recognized_travel_expense
 
     travel_expense = calculate_recognized_travel_expense(
+        session,
+        user_id=user_id,
+    )
+    savings_allocation = calculate_recognized_savings_allocation(
         session,
         user_id=user_id,
     )
@@ -906,6 +920,7 @@ def calculate_account_balance(
         + Decimal(loan_totals["borrowed"])
         - Decimal(loan_totals["repaid"])
         - Decimal(travel_expense)
+        - Decimal(savings_allocation)
     )
     if amount != amount.to_integral_value() or not (
         -JSON_SAFE_INTEGER_MAX <= amount <= JSON_SAFE_INTEGER_MAX

@@ -798,8 +798,8 @@ function DashboardReports({ active = true }: { active?: boolean }) {
                     <p className="account-balance-detail">
                       Starting balance {displayMoney(configuredBalance.starting_balance_kyat)} as of end of{' '}
                       {formatDateOnly(configuredBalance.effective_date, { month: 'short', day: 'numeric', year: 'numeric' })};
-                      only later transactions and loan cash flows, plus recognized
-                      travel, are applied. As of{' '}
+                      only later transactions and loan cash flows are applied, then
+                      recognized travel and savings allocations are reserved. As of{' '}
                       {formatDateOnly(configuredBalance.as_of_date, { month: 'short', day: 'numeric', year: 'numeric' })}.
                     </p>
                   ) : (

@@ -17,6 +17,7 @@ from tests.tx_support import (
     category_id,
     create_transaction,
     headers,
+    new_key,
     register_verify_login,
     set_starting_balance,
     transaction_payload,
@@ -136,7 +137,88 @@ def test_balance_allows_negative_results(tx_env: TransactionEnv):
     asyncio.run(scenario())
 
 
-def test_balance_includes_loan_cash_flow_and_excludes_savings_and_trip_spending(
+def test_balance_recalculates_after_transaction_edits_and_deletes(
+    tx_env: TransactionEnv,
+):
+    salary = category_id(tx_env, "income", "Salary")
+    groceries = category_id(tx_env, "expense", "Groceries")
+
+    async def scenario() -> None:
+        async with tx_env.client() as client:
+            _, session = await register_verify_login(client, tx_env)
+            token = session["access_token"]
+            user_id = session["user"]["id"]
+            set_starting_balance(
+                tx_env,
+                user_id=user_id,
+                starting_balance_kyat=100_000,
+                effective_date="2026-01-01",
+            )
+
+            income = await create_transaction(
+                client,
+                token,
+                transaction_payload(
+                    salary,
+                    description="Salary",
+                    transaction_type="income",
+                    amount_kyat=50_000,
+                    transaction_date="2026-01-02",
+                ),
+            )
+            assert income.status_code == 201, income.text
+            assert _balance(tx_env, user_id).amount_kyat == 150_000
+
+            expense = await create_transaction(
+                client,
+                token,
+                transaction_payload(
+                    groceries,
+                    description="Market",
+                    amount_kyat=20_000,
+                    transaction_date="2026-01-03",
+                ),
+            )
+            assert expense.status_code == 201, expense.text
+            assert _balance(tx_env, user_id).amount_kyat == 130_000
+
+            edited = await client.patch(
+                f"/api/v1/transactions/{expense.json()['data']['id']}",
+                json={"amount_kyat": 30_000},
+                headers=headers(
+                    token=token,
+                    if_match=expense.headers["etag"],
+                ),
+            )
+            assert edited.status_code == 200, edited.text
+            assert _balance(tx_env, user_id).amount_kyat == 120_000
+
+            deleted_expense = await client.delete(
+                f"/api/v1/transactions/{expense.json()['data']['id']}",
+                headers=headers(
+                    token=token,
+                    idem=new_key("delete"),
+                    if_match=edited.headers["etag"],
+                ),
+            )
+            assert deleted_expense.status_code == 204, deleted_expense.text
+            assert _balance(tx_env, user_id).amount_kyat == 150_000
+
+            deleted_income = await client.delete(
+                f"/api/v1/transactions/{income.json()['data']['id']}",
+                headers=headers(
+                    token=token,
+                    idem=new_key("delete"),
+                    if_match=income.headers["etag"],
+                ),
+            )
+            assert deleted_income.status_code == 204, deleted_income.text
+            assert _balance(tx_env, user_id).amount_kyat == 100_000
+
+    asyncio.run(scenario())
+
+
+def test_balance_includes_loan_cash_flow_and_savings_allocation(
     tx_env: TransactionEnv,
 ):
     salary = category_id(tx_env, "income", "Salary")
@@ -220,10 +302,12 @@ def test_balance_includes_loan_cash_flow_and_excludes_savings_and_trip_spending(
             )
 
             # Borrowed principal increases the balance; the unreversed
-            # repayment decreases it once. Savings remain excluded. The active
-            # trip has no allocation, so its actual 30,000 spending is the
-            # recognized travel expense.
-            assert _balance(tx_env, user_id).amount_kyat == 45_000
+            # repayment decreases it once. The active savings goal reserves its
+            # 50,000 target, while the 15,000 contribution does not deduct
+            # twice. The active trip has no allocation, so its actual 30,000
+            # spending is the recognized travel expense.
+            # 100,000 - 25,000 - 50,000 - 30,000 = -5,000.
+            assert _balance(tx_env, user_id).amount_kyat == -5_000
 
             response = await create_transaction(
                 client,
@@ -237,7 +321,73 @@ def test_balance_includes_loan_cash_flow_and_excludes_savings_and_trip_spending(
                 ),
             )
             assert response.status_code == 201
-            assert _balance(tx_env, user_id).amount_kyat == 145_000
+            assert _balance(tx_env, user_id).amount_kyat == 95_000
+
+    asyncio.run(scenario())
+
+
+def test_balance_reconciles_loan_principal_edits_and_repayment_corrections(
+    tx_env: TransactionEnv,
+):
+    async def scenario() -> None:
+        async with tx_env.client() as client:
+            _, session = await register_verify_login(client, tx_env)
+            token = session["access_token"]
+            user_id = session["user"]["id"]
+            set_starting_balance(
+                tx_env,
+                user_id=user_id,
+                starting_balance_kyat=0,
+                effective_date="2026-01-01",
+            )
+
+            created = await client.post(
+                "/api/v1/loans",
+                json={
+                    "name": "Working loan",
+                    "principal_kyat": 100_000,
+                    "start_date": "2026-01-02",
+                },
+                headers=headers(token=token, idem=new_key("loan")),
+            )
+            assert created.status_code == 201, created.text
+            loan_id = created.json()["data"]["id"]
+            assert _balance(tx_env, user_id).amount_kyat == 100_000
+
+            edited = await client.patch(
+                f"/api/v1/loans/{loan_id}",
+                json={"principal_kyat": 60_000},
+                headers=headers(
+                    token=token,
+                    if_match=created.headers["etag"],
+                ),
+            )
+            assert edited.status_code == 200, edited.text
+            assert _balance(tx_env, user_id).amount_kyat == 60_000
+
+            repayment = await client.post(
+                f"/api/v1/loans/{loan_id}/repayments",
+                json={
+                    "amount_kyat": 10_000,
+                    "repayment_date": "2026-01-03",
+                    "note": "Cash payment",
+                },
+                headers=headers(token=token, idem=new_key("repay")),
+            )
+            assert repayment.status_code == 201, repayment.text
+            repayment_id = repayment.json()["data"]["id"]
+            # Repayments are loan cash flow and are not also transaction
+            # expenses, so the balance counts this outflow exactly once.
+            assert _balance(tx_env, user_id).amount_kyat == 50_000
+
+            correction = await client.post(
+                f"/api/v1/loans/{loan_id}/repayments/{repayment_id}/corrections",
+                json={"reason": "Recorded twice"},
+                headers=headers(token=token, idem=new_key("correction")),
+            )
+            assert correction.status_code == 201, correction.text
+            # A fully reversed repayment is no longer a cash outflow.
+            assert _balance(tx_env, user_id).amount_kyat == 60_000
 
     asyncio.run(scenario())
 

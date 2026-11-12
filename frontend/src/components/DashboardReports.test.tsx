@@ -359,6 +359,39 @@ describe('DashboardReports loading and dashboard overview', () => {
     })
   })
 
+  it('applies an updated backend balance after transactions or allocations change', async () => {
+    mocks.fetchFinancialSettings
+      .mockResolvedValueOnce({
+        settings: settingsFixture({ amount_kyat: 111_111 }),
+        etag: '"3"',
+      })
+      .mockResolvedValueOnce({
+        settings: settingsFixture({ amount_kyat: 222_222 }),
+        etag: '"3"',
+      })
+    mocks.fetchDashboardOverview
+      .mockResolvedValueOnce(overviewFixture({
+        account_balance: balanceFixture({ amount_kyat: 111_111 }),
+      }))
+      .mockResolvedValueOnce(overviewFixture({
+        account_balance: balanceFixture({ amount_kyat: 222_222 }),
+      }))
+
+    const view = render(<DashboardReports active={false} />)
+    await screen.findByRole('heading', { name: 'Calculated account balance' })
+    await waitFor(() => {
+      expect(within(accountBalanceCard()).getByText('111,111 MMK'))
+        .toBeInTheDocument()
+    })
+
+    view.rerender(<DashboardReports active />)
+
+    await waitFor(() => {
+      expect(within(accountBalanceCard()).getByText('222,222 MMK'))
+        .toBeInTheDocument()
+    })
+  })
+
   it('keeps a not-configured balance distinct from zero', async () => {
     mocks.fetchFinancialSettings.mockResolvedValue({
       settings: notConfiguredSettings(),

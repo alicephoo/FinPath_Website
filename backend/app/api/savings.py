@@ -15,6 +15,7 @@ from app.schemas.savings import (
     SavingsContributionCreateRequest,
     SavingsEntryListResponse,
     SavingsEntryResponse,
+    SavingsGoalArchiveRequest,
     SavingsGoalCreateRequest,
     SavingsGoalListResponse,
     SavingsGoalResponse,
@@ -111,6 +112,62 @@ def update_savings_goal(
         status_code=200,
         content=view.body,
         headers={"ETag": view.etag},
+    )
+
+
+@router.post(
+    "/savings/goals/{goal_id}/archive",
+    status_code=200,
+    response_model=SavingsGoalResponse,
+)
+def archive_savings_goal(
+    goal_id: UUID,
+    payload: SavingsGoalArchiveRequest,
+    if_match: IfMatch = None,
+    idempotency_key: IdempotencyKey = None,
+    context: AuthContext = Depends(get_current_auth),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    result = savings_service.archive_goal(
+        db,
+        context=context,
+        goal_id=goal_id,
+        payload=payload,
+        if_match=if_match,
+        idempotency_key=idempotency_key or "",
+    )
+    return JSONResponse(
+        status_code=result.status_code,
+        content=result.body,
+        headers=result.headers,
+    )
+
+
+@router.post(
+    "/savings/goals/{goal_id}/restore",
+    status_code=200,
+    response_model=SavingsGoalResponse,
+)
+def restore_savings_goal(
+    goal_id: UUID,
+    payload: SavingsGoalArchiveRequest,
+    if_match: IfMatch = None,
+    idempotency_key: IdempotencyKey = None,
+    context: AuthContext = Depends(get_current_auth),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    result = savings_service.restore_goal(
+        db,
+        context=context,
+        goal_id=goal_id,
+        payload=payload,
+        if_match=if_match,
+        idempotency_key=idempotency_key or "",
+    )
+    return JSONResponse(
+        status_code=result.status_code,
+        content=result.body,
+        headers=result.headers,
     )
 
 
