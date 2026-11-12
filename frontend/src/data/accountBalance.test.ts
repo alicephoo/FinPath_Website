@@ -24,14 +24,14 @@ describe('calculateAccountBalanceKyat', () => {
     )).toBe(15_000)
   })
 
-  it('adds income and subtracts expenses strictly after the effective date', () => {
+  it('adds income and subtracts expenses on or after the effective date', () => {
     const transactions = [
       transaction('before', 'income', 5000, '2026-10-09'),
       transaction('same-day', 'expense', 2000, '2026-10-10'),
       transaction('income', 'income', 4000, '2026-10-11'),
       transaction('expense', 'expense', 1250, '2026-10-12'),
     ]
-    expect(calculateAccountBalanceKyat(startingBalance, transactions)).toBe(12_750)
+    expect(calculateAccountBalanceKyat(startingBalance, transactions)).toBe(10_750)
   })
 
   it('reflects edits and removals to eligible transactions', () => {

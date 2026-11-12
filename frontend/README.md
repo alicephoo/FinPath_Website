@@ -155,7 +155,9 @@ resources; no dashboard figures are recalculated from mock data.
 - Whole-Kyat MMK values only. Zero and negative starting balances are valid, and
   decimals are rejected before any request is sent.
 - Saving sends **both** `starting_balance_kyat` and `effective_date` together.
-  Clearing sends both as `null`.
+  Clearing sends both as `null`. The starting balance is treated as the opening
+  balance at the beginning of `effective_date`, so same-day transactions and
+  loan cash movements affect the calculated balance.
 - Every save sends the latest settings `ETag` in `If-Match` and stores the
   returned `ETag` for the next update.
 - If the initial settings response has no `ETag`, the dashboard reloads the

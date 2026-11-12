@@ -696,7 +696,7 @@ def test_dashboard_uses_saved_financial_settings(
             )
             assert configured.status_code == 200, configured.text
             assert configured.headers["etag"] == '"2"'
-            assert configured.json()["data"]["amount_kyat"] == 130_000
+            assert configured.json()["data"]["amount_kyat"] == 1_018_888
 
             first_dashboard = await get_dashboard(client, token)
             assert first_dashboard.status_code == 200, first_dashboard.text
@@ -706,7 +706,7 @@ def test_dashboard_uses_saved_financial_settings(
             assert first_balance["effective_date"] == (
                 EFFECTIVE_DATE.isoformat()
             )
-            assert first_balance["amount_kyat"] == 130_000
+            assert first_balance["amount_kyat"] == 1_018_888
 
             updated = await put_settings(
                 client,

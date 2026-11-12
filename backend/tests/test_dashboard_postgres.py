@@ -313,16 +313,17 @@ def test_dashboard_summaries_recent_transactions_and_ownership(
             assert balance["status"] == "configured"
             assert balance["starting_balance_kyat"] == 100_000
             assert balance["effective_date"] == BOUNDARY_DATE.isoformat()
-            # Only current-month transactions and loan cash movements are
-            # strictly after the boundary date. The older and on-boundary
-            # transaction rows are excluded.
+            # The boundary-date transaction is included because the starting
+            # balance is the opening balance at the beginning of that date.
+            # Only the older transaction is excluded.
             #
             # 100,000 starting
+            # + 999,999 income dated exactly on the boundary
             # + 50,000 income - 20,000 expense
             # + 100,000 car-loan proceeds - 10,000 car-loan repayment
             # + 50,000 paid-loan proceeds - 50,000 paid-loan repayment
             # - 150,000 savings allocations (100,000 + 50,000 targets)
-            assert balance["amount_kyat"] == 70_000
+            assert balance["amount_kyat"] == 1_069_999
             assert balance["as_of_date"] == TODAY.isoformat()
 
             # All-time transaction totals include every transaction but no

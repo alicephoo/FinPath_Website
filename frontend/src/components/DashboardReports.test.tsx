@@ -330,7 +330,7 @@ describe('DashboardReports loading and dashboard overview', () => {
     expect(within(card).getAllByText(formatMoney(startingBalanceKyat)).length)
       .toBeGreaterThan(0)
     expect(within(card).getByText(
-      new RegExp(`Starting balance ${formatMoney(startingBalanceKyat)} as of end of`),
+      new RegExp(`Starting balance ${formatMoney(startingBalanceKyat)} as of start of`),
     )).toBeInTheDocument()
   })
 

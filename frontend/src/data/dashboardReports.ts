@@ -113,7 +113,7 @@ export function buildDashboardReport(
     : null
 
   const rows: DashboardReportRow[] = [
-    { section: 'Summary', record: 'Calculated account balance', dateOrPeriod: startingBalance ? `As of ${localDateKey(now)}` : 'Not set', category: '', amountKyat: accountBalanceKyat ?? '', comparisonKyat: '', statusOrNotes: startingBalance ? `Starting balance ${formatMoney(startingBalance.amountKyat)} effective at end of ${startingBalance.effectiveDate}; only later transactions applied` : 'Manually enter a starting balance and effective date' },
+    { section: 'Summary', record: 'Calculated account balance', dateOrPeriod: startingBalance ? `As of ${localDateKey(now)}` : 'Not set', category: '', amountKyat: accountBalanceKyat ?? '', comparisonKyat: '', statusOrNotes: startingBalance ? `Starting balance ${formatMoney(startingBalance.amountKyat)} as of the start of ${startingBalance.effectiveDate}; transactions on or after that date applied` : 'Manually enter a starting balance and effective date' },
     { section: 'Summary', record: 'All-time recorded income', dateOrPeriod: 'All time', category: '', amountKyat: allTimeIncomeKyat, comparisonKyat: '', statusOrNotes: 'Transactions only' },
     { section: 'Summary', record: 'All-time recorded transaction expenses', dateOrPeriod: 'All time', category: '', amountKyat: allTimeExpenseKyat, comparisonKyat: '', statusOrNotes: 'Travel spending reported separately' },
     { section: 'Summary', record: 'Net transaction flow', dateOrPeriod: 'All time', category: '', amountKyat: sumMoneyKyat([allTimeIncomeKyat, -allTimeExpenseKyat]), comparisonKyat: '', statusOrNotes: 'Recorded income minus recorded transaction expenses; not an account balance' },

@@ -266,9 +266,10 @@ the transaction's income/expense type; historical transactions remain readable
 if a category is later retired. The service also exposes exact account-balance
 calculation using the user's starting balance, transaction income minus
 expenses, borrowed loan principal, and unreversed loan repayments dated
-strictly after the effective date; it returns `not_configured` until both
-settings exist, allows negative results, excludes savings entries and trip
-spending, and raises `500 aggregate_out_of_range` rather than serializing an
+on or after the effective date; the starting balance is the opening balance at
+the beginning of that date. It returns `not_configured` until both
+settings exist, allows negative results, applies savings and travel allocation
+layers, and raises `500 aggregate_out_of_range` rather than serializing an
 unsafe JSON integer. Starting-balance management is not part of Task 4.2.
 
 The frontend is integrated with these whole-MMK-Kyat endpoints for the Dashboard,
@@ -434,7 +435,9 @@ JSON integers within the safe integer range; floats, strings, booleans, and
 unsafe values are rejected without rounding. `effective_date` accepts only a
 real local-calendar `YYYY-MM-DD` date. The Dashboard reads the saved values
 through the shared transaction balance service, preserving the cash-movement
-formula and the strict date boundary. No schema
+formula and the inclusive opening-balance date boundary. The starting balance
+is the opening balance at the beginning of its effective date, so same-day
+transactions and loan cash movements are included. No schema
 change or migration was required because registration already creates the row
 and `finpath_app` already has the necessary `SELECT` and column-level `UPDATE`
 privileges.

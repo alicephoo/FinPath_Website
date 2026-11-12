@@ -46,7 +46,7 @@ def test_balance_is_not_configured_until_both_settings_are_present(
     asyncio.run(scenario())
 
 
-def test_balance_uses_strict_effective_date_boundary_and_exact_arithmetic(
+def test_balance_includes_movements_on_or_after_effective_date_and_exact_arithmetic(
     tx_env: TransactionEnv,
 ):
     salary = category_id(tx_env, "income", "Salary")
@@ -99,9 +99,73 @@ def test_balance_uses_strict_effective_date_boundary_and_exact_arithmetic(
             assert result.status == "configured"
             assert result.starting_balance_kyat == 100_000
             assert result.effective_date.isoformat() == "2026-11-03"
-            # Only the 500,000 income and 200,000 expense are strictly after
-            # the effective date.
-            assert result.amount_kyat == 400_000
+            # The before-date income is excluded. The on-date expense plus the
+            # later income and expense are included because the starting
+            # balance is the opening balance at the beginning of its date.
+            # 100,000 - 888,888 + 500,000 - 200,000 = -488,888.
+            assert result.amount_kyat == -488_888
+
+    asyncio.run(scenario())
+
+
+def test_same_day_income_and_expenses_change_balance(tx_env: TransactionEnv):
+    salary = category_id(tx_env, "income", "Salary")
+    groceries = category_id(tx_env, "expense", "Groceries")
+
+    async def scenario() -> None:
+        async with tx_env.client() as client:
+            _, session = await register_verify_login(client, tx_env)
+            token = session["access_token"]
+            user_id = session["user"]["id"]
+            set_starting_balance(
+                tx_env,
+                user_id=user_id,
+                starting_balance_kyat=500_000,
+                effective_date="2026-11-12",
+            )
+
+            existing_expense = await create_transaction(
+                client,
+                token,
+                transaction_payload(
+                    groceries,
+                    description="Same-day existing expense",
+                    amount_kyat=100_000,
+                    transaction_date="2026-11-12",
+                ),
+            )
+            assert existing_expense.status_code == 201, existing_expense.text
+            # 500,000 opening balance - 100,000 same-day expense = 400,000.
+            assert _balance(tx_env, user_id).amount_kyat == 400_000
+
+            income = await create_transaction(
+                client,
+                token,
+                transaction_payload(
+                    salary,
+                    description="Same-day income",
+                    transaction_type="income",
+                    amount_kyat=50_000,
+                    transaction_date="2026-11-12",
+                ),
+            )
+            assert income.status_code == 201, income.text
+            # Same-day income increases the balance to 450,000.
+            assert _balance(tx_env, user_id).amount_kyat == 450_000
+
+            added_expense = await create_transaction(
+                client,
+                token,
+                transaction_payload(
+                    groceries,
+                    description="Same-day added expense",
+                    amount_kyat=25_000,
+                    transaction_date="2026-11-12",
+                ),
+            )
+            assert added_expense.status_code == 201, added_expense.text
+            # Same-day expense decreases the balance back to 425,000.
+            assert _balance(tx_env, user_id).amount_kyat == 425_000
 
     asyncio.run(scenario())
 
@@ -283,29 +347,29 @@ def test_balance_includes_loan_cash_flow_and_savings_allocation(
                 "INSERT INTO savings_entries "
                 "(id, user_id, goal_id, entry_type, amount_kyat, entry_date) "
                 "VALUES (:id, :user_id, :goal_id, 'contribution', 15000, "
-                "DATE '2026-01-04')",
+                "DATE '2026-01-01')",
                 {"id": uuid4(), "user_id": user_id, "goal_id": savings_goal_id},
             )
             tx_env.execute(
                 "INSERT INTO trips "
                 "(id, user_id, name, destination, start_date, end_date) "
-                "VALUES (:id, :user_id, 'Trip', 'Yangon', DATE '2026-01-05', "
-                "DATE '2026-01-06')",
+                "VALUES (:id, :user_id, 'Trip', 'Yangon', DATE '2026-01-01', "
+                "DATE '2026-01-01')",
                 {"id": trip_id, "user_id": user_id},
             )
             tx_env.execute(
                 "INSERT INTO trip_spending_entries "
                 "(id, user_id, trip_id, category, description, amount_kyat, "
                 "spending_date) VALUES (:id, :user_id, :trip_id, 'Food', "
-                "'Lunch', 30000, DATE '2026-01-05')",
+                "'Lunch', 30000, DATE '2026-01-01')",
                 {"id": uuid4(), "user_id": user_id, "trip_id": trip_id},
             )
 
             # Borrowed principal increases the balance; the unreversed
             # repayment decreases it once. The active savings goal reserves its
-            # 50,000 target, while the 15,000 contribution does not deduct
-            # twice. The active trip has no allocation, so its actual 30,000
-            # spending is the recognized travel expense.
+            # 50,000 target, while the same-day 15,000 contribution does not
+            # deduct twice. The active trip has no allocation, so its same-day
+            # actual 30,000 spending is the recognized travel expense.
             # 100,000 - 25,000 - 50,000 - 30,000 = -5,000.
             assert _balance(tx_env, user_id).amount_kyat == -5_000
 
@@ -442,8 +506,11 @@ def test_balance_applies_effective_date_boundary_to_loan_cash_flow(
                     },
                 )
 
-            # Only the loan and repayment strictly after 2026-06-10 count.
-            assert _balance(tx_env, user_id).amount_kyat == 270_000
+            # The loan and repayment dated exactly on 2026-06-10 are included,
+            # as are later movements. Only the before-date loan and repayment
+            # are excluded.
+            # 200,000 + 300,000 - 20,000 - 30,000 = 450,000.
+            assert _balance(tx_env, user_id).amount_kyat == 450_000
 
     asyncio.run(scenario())
 

@@ -11,7 +11,7 @@ export function calculateAccountBalanceKyat(
   transactions: readonly Transaction[],
 ): number {
   const eligibleTransactions = transactions
-    .filter((transaction) => transaction.date > startingBalance.effectiveDate)
+    .filter((transaction) => transaction.date >= startingBalance.effectiveDate)
     .map((transaction) => transaction.type === 'income'
       ? transaction.amountKyat
       : -transaction.amountKyat)

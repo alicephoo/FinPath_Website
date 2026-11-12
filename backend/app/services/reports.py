@@ -349,8 +349,9 @@ def export_dashboard_csv(
         balance_amount,
         "",
         (
-            f"Starting balance {balance['starting_balance_kyat']} MMK effective "
-            f"at end of {balance['effective_date']}; only later movements applied"
+            f"Starting balance {balance['starting_balance_kyat']} MMK as of "
+            f"the start of {balance['effective_date']}; transactions "
+            f"on or after that date applied"
             if balance["status"] == "configured"
             else "Manually enter a starting balance and effective date"
         ),

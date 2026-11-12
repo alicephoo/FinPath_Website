@@ -800,12 +800,13 @@ def calculate_account_balance(
     """Return the owner's starting-balance plus eligible cash movements.
 
     Transactions, loan proceeds, and unreversed loan repayments are included
-    only when their respective dates are strictly after the configured
-    effective date. The loan model is borrowing-only: ``loans.start_date`` is
-    the date the borrowed cash was received, and each unreversed
-    ``loan_repayments`` row is a cash outflow. Loan repayments are not
-    transaction expenses, so they are counted exactly once here. Travel is an
-    allocation layer: each active trip deducts the greater of its planned
+    when their respective dates are on or after the configured effective date.
+    The starting balance is the opening balance at the beginning of that date,
+    so same-day movements are eligible. The loan model is borrowing-only:
+    ``loans.start_date`` is the date the borrowed cash was received, and each
+    unreversed ``loan_repayments`` row is a cash outflow. Loan repayments are
+    not transaction expenses, so they are counted exactly once here. Travel is
+    an allocation layer: each active trip deducts the greater of its planned
     budget and actual spending, while completed or cancelled trips deduct
     actual spending only. Savings follows the same allocation model: an active
     goal reserves ``max(target, contributions) - withdrawals``, so creating or
@@ -857,7 +858,7 @@ def calculate_account_balance(
                 ) AS expense
             FROM transactions
             WHERE user_id = :user_id
-              AND transaction_date > :effective_date
+              AND transaction_date >= :effective_date
             """
         ),
         {
@@ -874,7 +875,7 @@ def calculate_account_balance(
                     SELECT SUM(l.principal_kyat::numeric)
                     FROM loans AS l
                     WHERE l.user_id = :user_id
-                      AND l.start_date > :effective_date
+                      AND l.start_date >= :effective_date
                 ), 0) AS borrowed,
                 COALESCE((
                     SELECT SUM(r.amount_kyat::numeric)
@@ -883,7 +884,7 @@ def calculate_account_balance(
                         ON c.repayment_id = r.id
                     WHERE r.user_id = :user_id
                       AND c.id IS NULL
-                      AND r.repayment_date > :effective_date
+                      AND r.repayment_date >= :effective_date
                 ), 0) AS repaid
             """
         ),
