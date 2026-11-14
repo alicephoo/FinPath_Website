@@ -249,3 +249,161 @@ jobs:
             frontend/test-results
           if-no-files-found: ignore
           retention-days: 7
+
+  docker:
+    name: Docker image builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build backend image
+        run: docker build --file backend/Dockerfile --tag finpath-backend:ci backend
+
+      - name: Build frontend image
+        run: docker build --file frontend/Dockerfile --tag finpath-frontend:ci frontend
+
+  staging-lite:
+    name: Backend container staging-lite
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_DB: finpath_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d finpath_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    # Disposable, trust-authenticated database only. These URLs carry no
+    # password and are never printed; they are passed to containers by name
+    # rather than embedded in a command line.
+    env:
+      FINPATH_DATABASE_URL: postgresql+psycopg://finpath_app@host.docker.internal:5432/finpath_test
+      FINPATH_MIGRATION_DATABASE_URL: postgresql+psycopg://finpath_migrator@host.docker.internal:5432/finpath_test
+      FINPATH_REGISTRATION_DATABASE_URL: postgresql+psycopg://finpath_registration@host.docker.internal:5432/finpath_test
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Create temporary CI database roles
+        run: |
+          # Wait for the service container's final TCP listener. PostgreSQL's
+          # initialization phase briefly exposes only a Unix socket.
+          for attempt in $(seq 1 30); do
+            if psql -h 127.0.0.1 -U postgres -d finpath_test -c 'SELECT 1' >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+
+          psql -h 127.0.0.1 -U postgres -d finpath_test -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE finpath_migrator LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+          CREATE ROLE finpath_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+          CREATE ROLE finpath_registration LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+
+          ALTER DATABASE finpath_test OWNER TO finpath_migrator;
+          ALTER SCHEMA public OWNER TO finpath_migrator;
+          GRANT USAGE, CREATE ON SCHEMA public TO finpath_migrator;
+          GRANT CONNECT ON DATABASE finpath_test TO finpath_app, finpath_registration;
+          SQL
+
+      - name: Build backend image
+        run: docker build --file backend/Dockerfile --tag finpath-backend:staging-ci backend
+
+      - name: Apply migrations and seed reference data
+        run: |
+          docker run --rm \
+            --add-host=host.docker.internal:host-gateway \
+            --env FINPATH_MIGRATION_DATABASE_URL \
+            --entrypoint alembic \
+            finpath-backend:staging-ci upgrade head
+
+          docker run --rm \
+            --add-host=host.docker.internal:host-gateway \
+            --env FINPATH_MIGRATION_DATABASE_URL \
+            --entrypoint python \
+            finpath-backend:staging-ci -m app.db.seed
+
+      - name: Start backend container
+        run: |
+          docker run --detach --name finpath-backend-staging \
+            --add-host=host.docker.internal:host-gateway \
+            --publish 8000:8000 \
+            --env FINPATH_DATABASE_URL \
+            --env FINPATH_REGISTRATION_DATABASE_URL \
+            --env FINPATH_ENVIRONMENT=test \
+            --env FINPATH_RUN_STARTUP_MIGRATIONS=false \
+            --env FINPATH_FRONTEND_ORIGINS=http://localhost:5173 \
+            --env FINPATH_ACCESS_TOKEN_SECRET="$(openssl rand -hex 32)" \
+            finpath-backend:staging-ci
+
+      - name: Wait for health and readiness
+        run: |
+          health_status=""
+          for attempt in $(seq 1 60); do
+            health_status=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/health || true)
+            if [ "$health_status" = "200" ]; then
+              break
+            fi
+            sleep 2
+          done
+          if [ "$health_status" != "200" ]; then
+            echo "GET /health did not return HTTP 200 within the timeout (last status: ${health_status:-none})."
+            docker logs finpath-backend-staging || true
+            exit 1
+          fi
+          echo "GET /health returned HTTP 200."
+
+          ready_status=""
+          for attempt in $(seq 1 30); do
+            ready_status=$(curl -s -o /tmp/finpath-ready.json -w '%{http_code}' http://127.0.0.1:8000/ready || true)
+            if [ "$ready_status" = "200" ] && grep -q '"status":"ready"' /tmp/finpath-ready.json; then
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready_status" != "200" ] || ! grep -q '"status":"ready"' /tmp/finpath-ready.json; then
+            echo "GET /ready did not report ready within the timeout (last status: ${ready_status:-none})."
+            docker logs finpath-backend-staging || true
+            exit 1
+          fi
+          echo "GET /ready reported ready."
+
+      - name: API smoke test (invalid login)
+        run: |
+          # Non-mutating check: a nonexistent account must fail authentication
+          # without creating or changing any database records. The trusted
+          # Origin header is required or the endpoint returns 403 instead.
+          login_status=$(curl -s -o /tmp/finpath-smoke.json -w '%{http_code}' \
+            --request POST http://127.0.0.1:8000/api/v1/auth/login \
+            --header 'Content-Type: application/json' \
+            --header 'Origin: http://localhost:5173' \
+            --data '{"email":"smoke-test@example.invalid","password":"smoke-test-password"}' \
+            || true)
+          echo "POST /api/v1/auth/login returned HTTP ${login_status:-none}."
+          cat /tmp/finpath-smoke.json
+          if [ "$login_status" != "401" ]; then
+            echo "Expected HTTP 401 from an invalid login."
+            exit 1
+          fi
+          if ! grep -q 'authentication_failed' /tmp/finpath-smoke.json; then
+            echo "Expected error code authentication_failed."
+            exit 1
+          fi
+          echo "Invalid login correctly returned 401 authentication_failed."
+
+      - name: Show backend container logs on failure
+        if: failure()
+        run: docker logs finpath-backend-staging || true
+
+      - name: Stop backend container
+        if: always()
+        run: docker rm --force finpath-backend-staging || true
