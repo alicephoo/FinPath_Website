@@ -1,0 +1,99 @@
+name: FinPath on-call agent
+
+# Deterministic, bounded on-call response to a failed production alerting run.
+# This is not an LLM agent. It reads only the safe alert summary, classifies
+# the failure, and (for an isolated fixture scenario) proposes and verifies a
+# small patch. It never writes to the repository, opens issues/PRs, deploys, or
+# changes production configuration.
+on:
+  workflow_run:
+    workflows: ["FinPath production alerting"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: "Controlled simulation scenario (no production probes)"
+        type: choice
+        options:
+          - frontend_marker_fixture
+          - auth_origin_fixture
+          - backend_ready_outage
+          - unknown_failure
+        default: frontend_marker_fixture
+
+# Read-only. The failed run log is read with actions: read; the checkout uses
+# contents: read. No secrets, write tokens, or deployments are used.
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: finpath-oncall-${{ github.event.workflow_run.id || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  investigate:
+    name: FinPath on-call investigation
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # pytest is already a backend dev dependency. The focused verification
+      # runs with --noconftest so it does not need the application dependency
+      # stack or any environment file.
+      - name: Install focused test runner
+        if: github.event_name == 'workflow_dispatch'
+        working-directory: backend
+        run: python -m pip install --disable-pip-version-check pytest
+
+      - name: Run controlled simulation
+        if: github.event_name == 'workflow_dispatch'
+        working-directory: backend
+        env:
+          ONCALL_SCENARIO: ${{ inputs.scenario }}
+        run: |
+          python -m app.core.oncall_agent simulate \
+            --scenario "$ONCALL_SCENARIO" \
+            --output-dir "$RUNNER_TEMP/oncall-artifacts" \
+            --work-dir "$RUNNER_TEMP/oncall-repair"
+
+      # This does not check out the failed run's commit. It reads only the
+      # completed run's log and parses the allowlisted alert summary lines.
+      - name: Investigate failed alerting run
+        if: github.event_name == 'workflow_run'
+        working-directory: backend
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          gh run view "$RUN_ID" --log > "$RUNNER_TEMP/oncall-run.log"
+          python -m app.core.oncall_agent diagnose \
+            --log-file "$RUNNER_TEMP/oncall-run.log" \
+            --output-dir "$RUNNER_TEMP/oncall-artifacts" \
+            --run-id "$RUN_ID"
+
+      - name: Upload on-call evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oncall-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/oncall-artifacts
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Write job summary
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/oncall-artifacts/oncall-report.md" ]; then
+            cat "$RUNNER_TEMP/oncall-artifacts/oncall-report.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "On-call agent produced no report. Investigate the failed step manually." >> "$GITHUB_STEP_SUMMARY"
+          fi

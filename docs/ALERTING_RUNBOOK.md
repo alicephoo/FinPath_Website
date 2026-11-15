@@ -11,12 +11,15 @@ A small, dependency-free runner sends four synthetic probes to the production
 FinPath deployment every hour. A pure evaluator turns the probe results into a
 single decision; any required-probe failure raises an alert, which is delivered
 as a failed GitHub Actions workflow run. There are no dashboards, metrics
-scrapes, third-party notification services, or automated remediation.
+scrapes, or third-party notification services. A separate deterministic on-call
+agent can read the failed-run summary and publish a diagnosis; it never changes
+production code or deploys. See [ONCALL_RUNBOOK.md](ONCALL_RUNBOOK.md).
 
 - Evaluator: `backend/app/core/alerting.py`
 - Runner: `backend/app/core/alerting_runner.py`
 - Workflow: `.github/workflows/alerting.yml`
 - Tests: `backend/tests/test_alerting.py`, `backend/tests/test_alerting_runner.py`
+- On-call agent: `backend/app/core/oncall_agent.py`, `.github/workflows/oncall-agent.yml`, [ONCALL_RUNBOOK.md](ONCALL_RUNBOOK.md)
 
 ## Monitored probes
 
@@ -121,7 +124,10 @@ workflow environment or runner code; no sensitive details are printed.
    response bodies, connection strings, or other personal data into issues,
    chat, or tickets.
 5. Do not attempt automatic remediation, deployment, or database changes in
-   response to an alert. Remediate manually through the normal release process.
+   response to an alert. The deterministic on-call agent may diagnose and, only
+   for an isolated fixture, propose a patch for human review; it never changes
+   production code. Remediate manually through the normal release process. See
+   [ONCALL_RUNBOOK.md](ONCALL_RUNBOOK.md).
 
 ## Known limitations
 
@@ -140,6 +146,17 @@ workflow environment or runner code; no sensitive details are printed.
   diagnostic.
 - **Notification dependency.** Alert delivery requires GitHub Actions to be
   enabled and the owner's failed-workflow notifications to be configured.
+
+## On-call agent
+
+A separate deterministic workflow, `.github/workflows/oncall-agent.yml`, triggers
+when this alerting workflow completes with `failure`. It reads only the safe
+alert summary, publishes a diagnosis, and — only for an isolated fixture —
+proposes and tests a patch. It is read-only and never changes production code.
+Run a manual simulation from **Actions → FinPath on-call agent → Run workflow**
+and choose a scenario. See [ONCALL_RUNBOOK.md](ONCALL_RUNBOOK.md) for
+classification rules, the repair allowlist, artifacts, and security
+restrictions.
 
 ## Activation
 
