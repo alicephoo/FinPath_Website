@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from app.api.errors import ApiError
 from app.core import security
 from app.core.config import settings
+from app.core.observability import log_domain_event
 from app.services.email import EmailDeliveryError, EmailMessage, EmailSender
 from app.services.idempotency import IdempotencyResult, run_idempotent
 
@@ -448,23 +449,50 @@ def login_user(
     user = _user_by_email(session, normalized_email)
     if user is None:
         security.verify_dummy_password(password)
+        log_domain_event(
+            "auth_login_failed",
+            level=logging.WARNING,
+            reason="invalid_credentials",
+        )
         raise ApiError(
             401,
             "authentication_failed",
             "The email or password is incorrect.",
         )
     if not security.verify_password(user["password_hash"], password):
+        log_domain_event(
+            "auth_login_failed",
+            level=logging.WARNING,
+            reason="invalid_credentials",
+        )
         raise ApiError(
             401,
             "authentication_failed",
             "The email or password is incorrect.",
         )
 
+    if user["status"] == "suspended":
+        log_domain_event(
+            "auth_login_failed",
+            level=logging.WARNING,
+            reason="account_suspended",
+        )
+    elif user["status"] == "closed":
+        log_domain_event(
+            "auth_login_failed",
+            level=logging.WARNING,
+            reason="account_closed",
+        )
     _raise_account_state(user["status"])
     if (
         settings.require_email_verification
         and user["email_verified_at"] is None
     ):
+        log_domain_event(
+            "auth_login_failed",
+            level=logging.WARNING,
+            reason="email_verification_required",
+        )
         raise ApiError(
             403,
             "email_verification_required",
@@ -500,6 +528,7 @@ def login_user(
         },
     )
     session.commit()
+    log_domain_event("auth_login_succeeded")
 
     roles = _roles_for_user(session, user["id"])
     csrf_token = security.create_csrf_token(session_family_id=family_id)

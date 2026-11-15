@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.api.errors import ApiError
 from app.core.config import settings
+from app.core.observability import log_domain_event
 from app.schemas.loans import (
     CorrectionCreateRequest,
     LoanCreateRequest,
@@ -340,7 +341,7 @@ def create_loan(
         )
 
     try:
-        result, _ = run_idempotent(
+        result, replayed = run_idempotent(
             session,
             scope=f"user:{context.user_id}",
             method="POST",
@@ -357,6 +358,8 @@ def create_loan(
     except SQLAlchemyError:
         session.rollback()
         raise
+    if not replayed:
+        log_domain_event("loan_created")
     return result
 
 
@@ -647,7 +650,7 @@ def create_repayment(
         )
 
     try:
-        result, _ = run_idempotent(
+        result, replayed = run_idempotent(
             session,
             scope=f"user:{context.user_id}",
             method="POST",
@@ -664,6 +667,8 @@ def create_repayment(
     except SQLAlchemyError:
         session.rollback()
         raise
+    if not replayed:
+        log_domain_event("loan_repayment_recorded")
     return result
 
 
@@ -794,7 +799,7 @@ def correct_repayment(
         )
 
     try:
-        result, _ = run_idempotent(
+        result, replayed = run_idempotent(
             session,
             scope=f"user:{context.user_id}",
             method="POST",
@@ -826,4 +831,6 @@ def correct_repayment(
     except SQLAlchemyError:
         session.rollback()
         raise
+    if not replayed:
+        log_domain_event("loan_repayment_reversed")
     return result

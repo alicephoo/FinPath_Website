@@ -46,6 +46,13 @@ class Settings(BaseSettings):
     # while still emitting one structured record per request.
     log_level: str = "INFO"
     slow_request_threshold_ms: int = 1000
+    # Metrics collection is disabled by default. Enabling it exposes the
+    # bounded metrics registry to instrumentation added in a later phase.
+    metrics_enabled: bool = False
+    # Optional bearer token required by the /metrics endpoint when metrics are
+    # enabled. An unset or empty value never authorizes access, so metrics stay
+    # unavailable rather than open. The secret is masked in representations.
+    metrics_token: SecretStr | None = None
     database_url: SecretStr = SecretStr(
         "postgresql+psycopg://finpath_app@127.0.0.1:5432/finpath"
     )

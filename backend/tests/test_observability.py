@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 
 import httpx
@@ -13,11 +14,17 @@ from fastapi.exceptions import RequestValidationError
 from app.api.errors import ApiError, api_error_handler, validation_error_handler
 from app.core.config import settings
 from app.core.observability import (
+    AUTH_LOGIN_FAILURE_REASONS,
+    DOMAIN_EVENT_NAMES,
     REQUEST_ID_HEADER,
     REQUEST_ID_MAX_LENGTH,
     REQUEST_ID_PATTERN,
     JsonFormatter,
+    RequestContextFilter,
     RequestContextMiddleware,
+    log_domain_event,
+    reset_request_id,
+    set_request_id,
 )
 from app.main import app
 
@@ -249,3 +256,204 @@ def test_formatted_log_record_excludes_headers_query_and_body(
     assert "Authorization" not in formatted
     assert "Cookie" not in formatted
     assert "/health" in formatted
+
+
+def _domain_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) in DOMAIN_EVENT_NAMES
+    ]
+
+
+def test_auth_login_failure_reason_vocabulary_is_fixed() -> None:
+    assert AUTH_LOGIN_FAILURE_REASONS == frozenset(
+        {
+            "invalid_credentials",
+            "email_verification_required",
+            "account_suspended",
+            "account_closed",
+        }
+    )
+
+
+@pytest.mark.parametrize("event", sorted(DOMAIN_EVENT_NAMES))
+def test_log_domain_event_emits_every_approved_event_name(
+    event: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    kwargs = (
+        {"reason": "invalid_credentials"}
+        if event == "auth_login_failed"
+        else {}
+    )
+
+    with caplog.at_level(logging.INFO):
+        log_domain_event(event, **kwargs)
+
+    records = _domain_records(caplog)
+    assert len(records) == 1
+    assert records[0].event == event
+    assert records[0].getMessage() == "Domain event recorded."
+
+
+def test_log_domain_event_rejects_unapproved_event_name() -> None:
+    with pytest.raises(ValueError):
+        log_domain_event("not_an_approved_event")
+
+
+def test_log_domain_event_rejects_unapproved_reason() -> None:
+    with pytest.raises(ValueError):
+        log_domain_event("auth_login_failed", reason="unknown_email")
+
+
+def test_log_domain_event_requires_reason_for_login_failure() -> None:
+    with pytest.raises(ValueError):
+        log_domain_event("auth_login_failed")
+
+
+def test_log_domain_event_rejects_reason_on_other_events() -> None:
+    with pytest.raises(ValueError):
+        log_domain_event("report_exported", reason="invalid_credentials")
+
+
+def test_login_failure_reason_is_identical_for_both_credential_failures(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Unknown email and incorrect password must be indistinguishable in logs.
+    with caplog.at_level(logging.WARNING):
+        log_domain_event(
+            "auth_login_failed",
+            level=logging.WARNING,
+            reason="invalid_credentials",
+        )
+        log_domain_event(
+            "auth_login_failed",
+            level=logging.WARNING,
+            reason="invalid_credentials",
+        )
+
+    records = _domain_records(caplog)
+    assert len(records) == 2
+    assert {record.reason for record in records} == {"invalid_credentials"}
+
+
+def test_login_failure_is_logged_at_warning_and_success_at_info(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.INFO):
+        log_domain_event("auth_login_succeeded")
+        log_domain_event(
+            "auth_login_failed",
+            level=logging.WARNING,
+            reason="account_closed",
+        )
+
+    by_event = {record.event: record for record in _domain_records(caplog)}
+    assert by_event["auth_login_succeeded"].levelno == logging.INFO
+    assert by_event["auth_login_failed"].levelno == logging.WARNING
+
+
+def test_domain_event_reason_is_rendered_in_json(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING):
+        log_domain_event(
+            "auth_login_failed",
+            level=logging.WARNING,
+            reason="email_verification_required",
+        )
+
+    payload = json.loads(JsonFormatter().format(_domain_records(caplog)[0]))
+    assert payload["event"] == "auth_login_failed"
+    assert payload["reason"] == "email_verification_required"
+
+
+def test_domain_event_json_only_contains_allowlisted_fields(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.INFO):
+        log_domain_event("transaction_created")
+
+    payload = json.loads(JsonFormatter().format(_domain_records(caplog)[0]))
+    assert set(payload) <= {
+        "timestamp",
+        "severity",
+        "logger",
+        "event",
+        "message",
+        "request_id",
+        "reason",
+    }
+
+
+def test_domain_event_request_id_is_attached_by_context_filter(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    event_logger = logging.getLogger("app.core.observability")
+    context_filter = RequestContextFilter()
+    event_logger.addFilter(context_filter)
+    token = set_request_id("domain-request-1")
+    try:
+        with caplog.at_level(logging.INFO):
+            log_domain_event("report_exported")
+    finally:
+        reset_request_id(token)
+        event_logger.removeFilter(context_filter)
+
+    record = _domain_records(caplog)[0]
+    assert record.request_id == "domain-request-1"
+
+
+def test_domain_event_inside_request_carries_request_id(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    test_app = FastAPI()
+    test_app.add_middleware(RequestContextMiddleware)
+
+    @test_app.get("/emit")
+    def emit() -> dict[str, bool]:
+        log_domain_event("report_exported")
+        return {"ok": True}
+
+    # Mirror production: the JSON handler owns the context filter.
+    event_logger = logging.getLogger("app.core.observability")
+    context_filter = RequestContextFilter()
+    event_logger.addFilter(context_filter)
+    try:
+        with caplog.at_level(logging.INFO):
+            response = asyncio.run(
+                _get(
+                    test_app,
+                    "/emit",
+                    headers={REQUEST_ID_HEADER: "domain-request-2"},
+                )
+            )
+    finally:
+        event_logger.removeFilter(context_filter)
+
+    assert response.status_code == 200
+    record = _domain_records(caplog)[0]
+    assert record.request_id == "domain-request-2"
+
+
+def test_domain_event_json_never_contains_sensitive_values(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.INFO):
+        log_domain_event("loan_repayment_recorded")
+        log_domain_event("savings_goal_archived")
+        log_domain_event("travel_spending_recorded")
+        log_domain_event(
+            "auth_login_failed",
+            level=logging.WARNING,
+            reason="invalid_credentials",
+        )
+
+    for record in _domain_records(caplog):
+        formatted = JsonFormatter().format(record)
+        assert "top-secret" not in formatted
+        assert "@example.test" not in formatted
+        assert "Bearer" not in formatted
+        assert "Authorization" not in formatted
+        assert "Cookie" not in formatted

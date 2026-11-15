@@ -16,11 +16,66 @@ export type ApiRequestOptions = {
 /**
  * The parsed response body. `data` is `undefined` for empty responses and is a
  * string for successful non-JSON responses such as a future CSV export.
+ *
+ * `requestId` is the validated `X-Request-ID` returned by the backend, when
+ * present. It exists for correlation only and never carries user or financial
+ * data.
  */
 export type ApiResponse<T> = {
   data: T | undefined
   status: number
   headers: Headers
+  requestId?: string
+}
+
+const REQUEST_ID_HEADER = 'X-Request-ID'
+
+/**
+ * Mirrors the backend contract in `backend/app/core/observability.py`:
+ * 1–128 characters, the first alphanumeric, the remainder limited to
+ * alphanumerics and `.`, `_`, `:` or `-`. Response IDs that do not match are
+ * ignored rather than surfaced.
+ */
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
+
+/**
+ * Generate a per-request correlation ID using the platform cryptographic UUID
+ * generator. Returns `undefined` when it is unavailable, in which case no
+ * header is sent and the backend generates its own ID. `Math.random()` is
+ * never used for this purpose.
+ */
+function generateRequestId(): string | undefined {
+  const cryptoApi = globalThis.crypto
+  if (cryptoApi && typeof cryptoApi.randomUUID === 'function') {
+    return cryptoApi.randomUUID()
+  }
+  return undefined
+}
+
+/**
+ * Read and validate the `X-Request-ID` response header. Missing or malformed
+ * values are treated as absent so callers never receive an untrusted string.
+ */
+function readResponseRequestId(headers: Headers): string | undefined {
+  const value = headers.get(REQUEST_ID_HEADER)
+  if (value === null) return undefined
+
+  const trimmed = value.trim()
+  return REQUEST_ID_PATTERN.test(trimmed) ? trimmed : undefined
+}
+
+/**
+ * Resolve the correlation ID to send with an outgoing request. A valid
+ * caller-supplied `X-Request-ID` is reused; otherwise a fresh ID is generated.
+ * Malformed caller values are never sent or exposed as correlation IDs.
+ */
+function resolveOutgoingRequestId(headers: Headers): string | undefined {
+  const provided = headers.get(REQUEST_ID_HEADER)
+  if (provided !== null) {
+    const trimmed = provided.trim()
+    if (REQUEST_ID_PATTERN.test(trimmed)) return trimmed
+  }
+  return generateRequestId()
 }
 
 type MethodOptions = Omit<ApiRequestOptions, 'method' | 'body'>
@@ -99,6 +154,7 @@ function parseSuccessBody<T>(response: Response, text: string): T | undefined {
       status: response.status,
       code: 'invalid_json_response',
       message: 'The server returned an invalid JSON response.',
+      requestId: readResponseRequestId(response.headers),
       headers: response.headers,
     })
   }
@@ -114,7 +170,8 @@ function parseHttpError(response: Response, text: string): ApiError {
     code: envelope?.code ?? 'http_error',
     message: envelope?.message ?? fallbackMessage,
     fieldErrors: envelope?.fieldErrors,
-    requestId: envelope?.requestId,
+    // Prefer the response header, then fall back to the error envelope.
+    requestId: readResponseRequestId(response.headers) ?? envelope?.requestId,
     headers: response.headers,
   })
 }
@@ -145,6 +202,10 @@ export async function apiRequest<T>(
   if (!headers.has('Accept')) {
     headers.set('Accept', 'application/json')
   }
+  const outgoingRequestId = resolveOutgoingRequestId(headers)
+  if (outgoingRequestId !== undefined) {
+    headers.set(REQUEST_ID_HEADER, outgoingRequestId)
+  }
   if (accessToken && !headers.has('Authorization')) {
     headers.set('Authorization', `Bearer ${accessToken}`)
   }
@@ -172,6 +233,7 @@ export async function apiRequest<T>(
       status: null,
       code: 'network_error',
       message: 'Unable to reach the FinPath API. Check your connection and try again.',
+      requestId: outgoingRequestId,
     })
   }
 
@@ -185,6 +247,7 @@ export async function apiRequest<T>(
     data: parseSuccessBody<T>(response, text),
     status: response.status,
     headers: response.headers,
+    requestId: readResponseRequestId(response.headers),
   }
 }
 

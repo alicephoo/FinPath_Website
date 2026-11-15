@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from app.api.errors import ApiError
 from app.core.config import settings
+from app.core.observability import log_domain_event
 from app.schemas.transactions import (
     TransactionCreateRequest,
     TransactionUpdateRequest,
@@ -378,7 +379,7 @@ def create_transaction(
         )
 
     try:
-        result, _ = run_idempotent(
+        result, replayed = run_idempotent(
             session,
             scope=f"user:{context.user_id}",
             method="POST",
@@ -414,6 +415,8 @@ def create_transaction(
     except SQLAlchemyError:
         session.rollback()
         raise
+    if not replayed:
+        log_domain_event("transaction_created")
     return result
 
 
@@ -651,6 +654,7 @@ def update_transaction(
         session.rollback()
         raise
 
+    log_domain_event("transaction_updated")
     return TransactionView(
         body={
             "data": {
@@ -705,7 +709,7 @@ def delete_transaction(
         return IdempotencyResult(status_code=204, body={}, headers={})
 
     try:
-        result, _ = run_idempotent(
+        result, replayed = run_idempotent(
             session,
             scope=f"user:{context.user_id}",
             method="DELETE",
@@ -722,6 +726,8 @@ def delete_transaction(
     except SQLAlchemyError:
         session.rollback()
         raise
+    if not replayed:
+        log_domain_event("transaction_deleted")
     return result
 
 

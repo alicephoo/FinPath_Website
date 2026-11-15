@@ -18,6 +18,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.api.errors import ApiError
+from app.core.observability import log_domain_event
 from app.services import dashboard as dashboard_service
 from app.services import loans as loan_service
 from app.services import savings as savings_service
@@ -607,4 +608,5 @@ def export_dashboard_csv(
 
     protect = [True, True, True, True, False, False, True]
     csv_lines = [_csv_row(row, protect=protect) for row in rows]
+    log_domain_event("report_exported")
     return "\r\n".join(csv_lines) + "\r\n"

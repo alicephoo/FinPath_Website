@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.api.errors import ApiError
 from app.core.config import settings
+from app.core.observability import log_domain_event
 from app.schemas.savings import (
     SavingsContributionCreateRequest,
     SavingsGoalArchiveRequest,
@@ -536,8 +537,10 @@ def _set_goal_archive_state(
     request_payload = payload.model_dump(mode="json")
     action = "archive" if archived else "restore"
     target_status = "archived" if archived else "active"
+    changed = False
 
     def operation() -> IdempotencyResult:
+        nonlocal changed
         if not payload.confirm:
             raise ApiError(
                 422,
@@ -607,6 +610,7 @@ def _set_goal_archive_state(
                 )
             updated_at = updated["updated_at"]
             revision = int(updated["revision"])
+            changed = True
 
         resource_row = {
             "id": row["id"],
@@ -626,7 +630,7 @@ def _set_goal_archive_state(
         )
 
     try:
-        result, _ = run_idempotent(
+        result, replayed = run_idempotent(
             session,
             scope=f"user:{context.user_id}",
             method="POST",
@@ -643,6 +647,10 @@ def _set_goal_archive_state(
     except SQLAlchemyError:
         session.rollback()
         raise
+    if not replayed and changed:
+        log_domain_event(
+            "savings_goal_archived" if archived else "savings_goal_restored"
+        )
     return result
 
 
@@ -879,7 +887,7 @@ def create_contribution(
         )
 
     try:
-        result, _ = run_idempotent(
+        result, replayed = run_idempotent(
             session,
             scope=f"user:{context.user_id}",
             method="POST",
@@ -896,6 +904,8 @@ def create_contribution(
     except SQLAlchemyError:
         session.rollback()
         raise
+    if not replayed:
+        log_domain_event("savings_contribution_recorded")
     return result
 
 
@@ -989,7 +999,7 @@ def create_withdrawal(
         )
 
     try:
-        result, _ = run_idempotent(
+        result, replayed = run_idempotent(
             session,
             scope=f"user:{context.user_id}",
             method="POST",
@@ -1006,4 +1016,6 @@ def create_withdrawal(
     except SQLAlchemyError:
         session.rollback()
         raise
+    if not replayed:
+        log_domain_event("savings_withdrawal_recorded")
     return result

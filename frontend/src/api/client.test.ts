@@ -318,3 +318,229 @@ describe('request cancellation', () => {
     expect(getRequestInit().signal).toBe(controller.signal)
   })
 })
+
+describe('request ID correlation', () => {
+  // Version 4 UUID as produced by the platform cryptographic generator.
+  const uuidPattern =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
+  it('sends a cryptographic X-Request-ID with each request', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ data: {} }))
+
+    await apiClient.get('/transactions')
+
+    const sent = getRequestHeaders().get('X-Request-ID')
+    expect(sent).toBeTruthy()
+    expect(sent).toMatch(uuidPattern)
+  })
+
+  it('sends a different X-Request-ID for separate requests', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ data: {} }))
+      .mockResolvedValueOnce(jsonResponse({ data: {} }))
+
+    await apiClient.get('/transactions')
+    await apiClient.get('/transactions')
+
+    const first = getRequestHeaders(0).get('X-Request-ID')
+    const second = getRequestHeaders(1).get('X-Request-ID')
+
+    expect(first).toBeTruthy()
+    expect(second).toBeTruthy()
+    expect(first).not.toBe(second)
+  })
+
+  it('preserves caller-supplied headers and an explicit X-Request-ID', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ data: {} }))
+
+    await apiClient.get('/transactions', {
+      headers: {
+        'X-Request-ID': 'caller-supplied-id',
+        'X-Custom-Header': 'custom-value',
+      },
+    })
+
+    const headers = getRequestHeaders()
+    expect(headers.get('X-Request-ID')).toBe('caller-supplied-id')
+    expect(headers.get('X-Custom-Header')).toBe('custom-value')
+    expect(headers.get('Accept')).toBe('application/json')
+  })
+
+  it('exposes the response X-Request-ID without changing the response body', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(
+      { data: { status: 'ok' } },
+      { headers: { 'X-Request-ID': 'response-request-id' } },
+    ))
+
+    const response = await apiClient.get<{ data: { status: string } }>('/health')
+
+    expect(response.requestId).toBe('response-request-id')
+    expect(response.data).toEqual({ data: { status: 'ok' } })
+    expect(response.status).toBe(200)
+    expect(response.headers.get('X-Request-ID')).toBe('response-request-id')
+  })
+
+  it('prefers the response header request ID on failure', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({
+      error: {
+        code: 'stale_revision',
+        message: 'The resource has changed. Reload and try again.',
+        field_errors: [],
+        request_id: 'envelope-request-id',
+      },
+    }, {
+      status: 412,
+      headers: { 'X-Request-ID': 'header-request-id' },
+    }))
+
+    const error = await captureApiError(apiClient.patch('/settings', { value: 1 }))
+
+    expect(error.status).toBe(412)
+    expect(error.code).toBe('stale_revision')
+    expect(error.message).toBe('The resource has changed. Reload and try again.')
+    expect(error.requestId).toBe('header-request-id')
+  })
+
+  it('falls back to the error-envelope request_id when the header is absent', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({
+      error: {
+        code: 'validation_error',
+        message: 'The request contains invalid values.',
+        field_errors: [],
+        request_id: 'envelope-request-id',
+      },
+    }, { status: 422 }))
+
+    const error = await captureApiError(apiClient.post('/transactions', {}))
+
+    expect(error.code).toBe('validation_error')
+    expect(error.requestId).toBe('envelope-request-id')
+  })
+
+  it('exposes a response request ID on non-JSON errors without changing status', async () => {
+    fetchMock.mockResolvedValue(new Response('Service unavailable', {
+      status: 503,
+      statusText: 'Service Unavailable',
+      headers: {
+        'Content-Type': 'text/plain',
+        'X-Request-ID': 'header-request-id',
+      },
+    }))
+
+    const error = await captureApiError(apiClient.get('/dashboard/overview'))
+
+    expect(error.status).toBe(503)
+    expect(error.code).toBe('http_error')
+    expect(error.message).toBe('Service Unavailable')
+    expect(error.requestId).toBe('header-request-id')
+  })
+
+  it('ignores missing, empty, or malformed response request IDs', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ data: {} }))
+      .mockResolvedValueOnce(jsonResponse(
+        { data: {} },
+        { headers: { 'X-Request-ID': 'bad id with spaces' } },
+      ))
+      .mockResolvedValueOnce(jsonResponse(
+        { data: {} },
+        { headers: { 'X-Request-ID': '' } },
+      ))
+
+    const missing = await apiClient.get('/transactions')
+    const malformed = await apiClient.get('/transactions')
+    const empty = await apiClient.get('/transactions')
+
+    expect(missing.requestId).toBeUndefined()
+    expect(malformed.requestId).toBeUndefined()
+    expect(empty.requestId).toBeUndefined()
+  })
+
+  it('does not send a request ID header when cryptographic UUIDs are unavailable', async () => {
+    const originalCrypto = globalThis.crypto
+    // Simulate an environment without a cryptographic UUID generator.
+    vi.stubGlobal('crypto', {
+      getRandomValues: originalCrypto.getRandomValues.bind(originalCrypto),
+    })
+    fetchMock.mockResolvedValue(jsonResponse({ data: {} }))
+
+    try {
+      await apiClient.get('/transactions')
+
+      expect(getRequestHeaders().has('X-Request-ID')).toBe(false)
+    } finally {
+      vi.stubGlobal('crypto', originalCrypto)
+    }
+  })
+
+  it('exposes the generated request ID when the network fails', async () => {
+    fetchMock.mockRejectedValue(new TypeError('Failed to fetch'))
+
+    const error = await captureApiError(apiClient.get('/transactions'))
+
+    expect(error.status).toBeNull()
+    expect(error.code).toBe('network_error')
+    expect(error.isNetworkError).toBe(true)
+
+    const sent = getRequestHeaders().get('X-Request-ID')
+    expect(sent).toBeTruthy()
+    expect(sent).toMatch(uuidPattern)
+    expect(error.requestId).toBe(sent)
+  })
+
+  it('preserves a valid caller-supplied request ID on network failure', async () => {
+    fetchMock.mockRejectedValue(new TypeError('Failed to fetch'))
+
+    const error = await captureApiError(apiClient.get('/transactions', {
+      headers: { 'X-Request-ID': 'caller-supplied-id' },
+    }))
+
+    expect(getRequestHeaders().get('X-Request-ID')).toBe('caller-supplied-id')
+    expect(error.code).toBe('network_error')
+    expect(error.requestId).toBe('caller-supplied-id')
+  })
+
+  it('does not expose a malformed caller-supplied request ID as a correlation ID', async () => {
+    fetchMock.mockRejectedValue(new TypeError('Failed to fetch'))
+
+    const error = await captureApiError(apiClient.get('/transactions', {
+      headers: { 'X-Request-ID': 'not a valid request id' },
+    }))
+
+    const sent = getRequestHeaders().get('X-Request-ID')
+    expect(sent).not.toBe('not a valid request id')
+    expect(sent).toBeTruthy()
+    expect(sent).toMatch(uuidPattern)
+    expect(error.requestId).toBe(sent)
+  })
+
+  it('leaves abort behavior unchanged when the network request is cancelled', async () => {
+    const controller = new AbortController()
+    const abortError = new DOMException('The operation was aborted.', 'AbortError')
+    fetchMock.mockRejectedValue(abortError)
+
+    await expect(apiClient.get('/transactions', {
+      signal: controller.signal,
+    })).rejects.toBe(abortError)
+  })
+
+  it('keeps response-header precedence over the envelope on HTTP errors', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({
+      error: {
+        code: 'stale_revision',
+        message: 'The resource has changed.',
+        field_errors: [],
+        request_id: 'envelope-request-id',
+      },
+    }, {
+      status: 412,
+      headers: { 'X-Request-ID': 'header-request-id' },
+    }))
+
+    const error = await captureApiError(apiClient.patch('/settings', { value: 1 }))
+
+    expect(error.status).toBe(412)
+    expect(error.code).toBe('stale_revision')
+    expect(error.requestId).toBe('header-request-id')
+  })
+})

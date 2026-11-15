@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 
 from app.api.errors import ApiError
 from app.core.config import settings
+from app.core.observability import log_domain_event
 from app.schemas.travel import (
     TripBudgetCreateRequest,
     TripBudgetUpdateRequest,
@@ -374,9 +375,10 @@ def _run_idempotent_write(
     idempotency_key: str,
     payload: dict[str, Any],
     operation,
+    event: str | None = None,
 ) -> IdempotencyResult:
     try:
-        result, _ = run_idempotent(
+        result, replayed = run_idempotent(
             session,
             scope=f"user:{context.user_id}",
             method=method,
@@ -393,6 +395,8 @@ def _run_idempotent_write(
     except SQLAlchemyError:
         session.rollback()
         raise
+    if event is not None and not replayed:
+        log_domain_event(event)
     return result
 
 
@@ -1223,6 +1227,7 @@ def create_spending(
         idempotency_key=idempotency_key,
         payload=payload.model_dump(mode="json"),
         operation=operation,
+        event="travel_spending_recorded",
     )
 
 
