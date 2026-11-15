@@ -1,7 +1,7 @@
 # FinPath Progress
 
 **Last updated:** 2026-11-15
-**Current status:** Implemented for the documented in-scope features and live in production. End-to-end observability (request-ID correlation, structured domain events, and an in-process metrics registry) is implemented and CI-verified at commit `33b3e05`, with metrics disabled in production by default. User-impact alerting (Phase 2A–2C) is implemented in the repository but is **not yet active**: the hourly workflow takes effect only after it is committed to the default branch and a run succeeds. See [docs/ALERTING_RUNBOOK.md](docs/ALERTING_RUNBOOK.md). Deferred items are listed in [Section 7](#7-known-limitations-and-deferred-features).
+**Current status:** Implemented for the documented in-scope features and live in production. End-to-end observability (request-ID correlation, structured domain events, and an in-process metrics registry) is implemented and CI-verified at commit `33b3e05`, with metrics disabled in production by default. User-impact alerting (Phase 2A–2C) is implemented in the repository; the workflow is merged and registered but has zero runs, so alerting is not yet verified active. A Tier 1 deterministic on-call agent (commit `9719671`) is implemented, CI-verified (run `43696552654`), and verified by local CLI simulations; native automatic `workflow_run` triggering is **not yet verified**. See [docs/ALERTING_RUNBOOK.md](docs/ALERTING_RUNBOOK.md) and [docs/ONCALL_RUNBOOK.md](docs/ONCALL_RUNBOOK.md). Deferred items are listed in [Section 7](#7-known-limitations-and-deferred-features).
 **Authoritative specification:** [PROJECT_SPEC.md](PROJECT_SPEC.md). This log summarizes progress and evidence; it does not override the specification.
 **Public overview:** [README.md](README.md).
 
@@ -14,13 +14,14 @@ FinPath is a full-stack personal finance and goal-planning web application for t
 | Area | Status |
 |---|---|
 | Application (documented scope) | Implemented — five tabs, backend-owned financial rules, PostgreSQL persistence |
-| Automated tests | Green in CI — backend, frontend, Playwright, Docker image build, and container smoke jobs |
+| Automated tests | Green — CI run `43696552654` for commit `9719671` passed all five jobs (backend: 543 passed, 2 skipped); the focused local on-call suite is 95 passed, 2 skipped |
 | Observability (C1–C3.2) | Implemented and CI-verified at commit `33b3e05` — request-ID correlation, structured domain events, and a Prometheus-format metrics registry with a protected `/metrics` endpoint; metrics disabled in production by default |
-| User-impact alerting (Phase 2A–2C) | Implemented locally, not active — four synthetic probes, a pure evaluator, a standard-library runner, 90 focused tests, and an hourly GitHub Actions workflow; activation pending default-branch merge and a successful run |
-| CI | Green — run `43174534132`, 2026-11-12 |
+| User-impact alerting (Phase 2A–2C) | Implemented locally, not active — four synthetic probes, a pure evaluator, a standard-library runner, 90 focused tests, and an hourly GitHub Actions workflow; activation pending a successful scheduled or manual run; the workflow is merged and registered but has zero runs |
+| On-Call Agent (Tier 1) | Implemented locally, partially verified — deterministic diagnosis, escalation, read-only `workflow_run` workflow, and fixture-only repair verification; local CLI simulations pass and CI run `43696552654` is green, but the GitHub Actions on-call workflow has zero runs, native automatic triggering is unverified, and no on-call rotation exists |
+| CI | Green — latest run `43696552654` for commit `9719671`, 2026-11-15; no automatic deployment |
 | Deployment | Live — Cloudflare Pages frontend and Render backend verified 2026-11-12; `/health` and `/ready` re-probed 2026-11-13 |
-| Documentation | `PROJECT_SPEC.md` is authoritative; `README.md` is current; `AGENTS.md` defines agent context and collaboration; `docs/ALERTING_RUNBOOK.md` documents alerting; the public [FinPath — Development Tracker](https://github.com/users/alicephoo/projects/1) tracks active tasks; this progress log was refreshed 2026-11-15 |
-| Zoomcamp rubric | 7 criteria complete, 4 partial, 1 missing; current maximum 22/24 — see [Section 6](#6-ai-dev-tools-zoomcamp-rubric-status) |
+| Documentation | `PROJECT_SPEC.md` is authoritative; `README.md` is current; `AGENTS.md` defines agent context and collaboration; `docs/ALERTING_RUNBOOK.md` documents alerting; `docs/ONCALL_RUNBOOK.md` documents on-call response; the public [FinPath — Development Tracker](https://github.com/users/alicephoo/projects/1) tracks active tasks; this progress log was refreshed 2026-11-15 |
+| Zoomcamp rubric | 7 criteria complete (14 confirmed points), 5 partial (up to 10 potential points), 0 missing; potential ceiling 24/24, not an awarded score — see [Section 6](#6-ai-dev-tools-zoomcamp-rubric-status) |
 | Deferred scope | Admin, rate limiting, MFA, RLS, and several API-only UI flows — see [Section 7](#7-known-limitations-and-deferred-features) |
 
 ## 2. Completed Milestones
@@ -39,6 +40,7 @@ FinPath is a full-stack personal finance and goal-planning web application for t
 | 2026-11-15 | GitHub Actions reported all five CI jobs passing for commit `33b3e05` (confirmed by the project owner; no run ID or URL supplied) | User confirmation; `.github/workflows/ci.yml` |
 | 2026-11-15 | User-impact alerting implemented locally (Phase 2A–2C): pure evaluator, standard-library probe runner, focused tests, and an hourly GitHub Actions workflow. Not yet active | `backend/app/core/alerting.py`, `backend/app/core/alerting_runner.py`, `backend/tests/test_alerting.py`, `backend/tests/test_alerting_runner.py`, `.github/workflows/alerting.yml`, `docs/ALERTING_RUNBOOK.md`; 65 evaluator + 25 runner tests pass in the focused run |
 | 2026-11-15 | Created and verified the public GitHub Projects v2 board [FinPath — Development Tracker](https://github.com/users/alicephoo/projects/1) with six draft tasks. No Issues, pull requests, labels, or milestones were created; no repository files changed | Board URL; `gh project view` (`public: true`, 6 items); unauthenticated HTTP 200; Todo/In Progress/Done status field |
+| 2026-11-15 | Tier 1 deterministic On-Call Agent committed as `9719671` (`feat: add deterministic on-call agent`) and pushed to `origin/main`: read-only `workflow_run` diagnosis workflow, rule-based classifier, fixture-only repair, focused tests, and local CLI simulations. CI run `43696552654` passed all five jobs (backend: 543 passed, 2 skipped). Native automatic `workflow_run` and manual `workflow_dispatch` triggering are not yet verified | Commit `9719671`; CI run `43696552654`; `.github/workflows/oncall-agent.yml`; `backend/app/core/oncall_agent.py`; `backend/tests/test_oncall_agent.py`; `docs/ONCALL_RUNBOOK.md` |
 
 ## 3. Current Implementation Status
 
@@ -59,7 +61,8 @@ Status reflects `PROJECT_SPEC.md` Appendix A and the implemented API/UI surface.
 | PostgreSQL persistence | Implemented | 20 tables, 6 Alembic revisions, seeded roles and categories |
 | ETags and idempotency | Implemented | `If-Match` concurrency protection and scoped 24-hour idempotency records |
 | Observability (C1–C3.2) | Implemented | `X-Request-ID` correlation end to end; allowlisted structured domain events; dependency-free metrics registry; HTTP request, duration, and slow-request metrics; protected `/metrics`; disabled by default |
-| User-impact alerting (Phase 2A–2C) | Implemented locally, not active | Four production probes (`frontend`, `backend_health`, `backend_ready`, `auth_smoke`), pure evaluator, standard-library runner with one retry and a 90-second budget, hourly workflow; activation pending default-branch merge and a successful run |
+| User-impact alerting (Phase 2A–2C) | Implemented locally, not active | Four production probes (`frontend`, `backend_health`, `backend_ready`, `auth_smoke`), pure evaluator, standard-library runner with one retry and a 90-second budget, hourly workflow; activation pending a successful scheduled or manual run; the workflow is merged and registered but has zero runs |
+| On-Call Agent (Tier 1) | Implemented locally, partially verified | Read-only `workflow_run`/`workflow_dispatch` diagnosis workflow; deterministic classification and escalation; fixture-only patch generation and verification; 95 passed / 2 skipped focused tests; CI run `43696552654` green (backend 543 passed / 2 skipped); GitHub Actions on-call workflow zero runs; native automatic triggering unverified; no on-call rotation yet |
 | Admin console, role management, audit UI | Deferred | Admin role and append-only audit table exist in the schema; no Admin API or UI |
 | Rate limiting | Not implemented | No request throttling or `429` handling |
 | MFA, passkeys, social login, email change, RLS | Deferred | Not implemented |
@@ -83,7 +86,23 @@ The workflow uploads Pytest and Playwright reports as artifacts. It does not dep
 
 ### Alerting workflow
 
-`.github/workflows/alerting.yml` is a separate scheduled monitoring workflow. It runs hourly (`0 * * * *` UTC) and on manual `workflow_dispatch`, with `contents: read` permission, a 3-minute job timeout, and no push or pull-request triggers. It runs `python -m app.core.alerting_runner` from `backend` on Python 3.12 with no dependency install, and a non-zero runner exit fails the job. It does not deploy. The workflow is **not yet active**: it takes effect only after being merged to the default branch and completing a successful run, as described in `docs/ALERTING_RUNBOOK.md`.
+`.github/workflows/alerting.yml` is a separate scheduled monitoring workflow. It runs hourly (`0 * * * *` UTC) and on manual `workflow_dispatch`, with `contents: read` permission, a 3-minute job timeout, and no push or pull-request triggers. It runs `python -m app.core.alerting_runner` from `backend` on Python 3.12 with no dependency install, and a non-zero runner exit fails the job. It does not deploy. The workflow is merged and registered but has **zero GitHub Actions runs**; a successful scheduled or manual run is still required, as described in `docs/ALERTING_RUNBOOK.md`.
+
+### On-Call Agent verification — commit `9719671`, 2026-11-15
+
+Commit `9719671` (`feat: add deterministic on-call agent`) added a read-only `workflow_run` diagnosis workflow, a rule-based classifier, and fixture-only repair verification.
+
+| Check | Result |
+|---|---|
+| On-Call focused tests | **95 passed, 2 skipped** (`tests/test_oncall_agent.py`) |
+| Alerting focused tests | **90 passed** (`tests/test_alerting.py`, `tests/test_alerting_runner.py`) |
+| Local CLI simulation — frontend fixture | `repair_verified`; focused test passed |
+| Local CLI simulation — auth fixture | `repair_verified`; focused test passed |
+| Local CLI simulation — readiness outage | `escalate`; no patch |
+| GitHub Actions on-call workflow | 0 runs (neither native `workflow_run` nor manual `workflow_dispatch`) |
+| Native automatic `workflow_run` trigger | **Not yet verified** |
+
+The two skipped tests are simulation-only and are exercised by the local CLI simulation. The GitHub Actions on-call workflow has zero runs, so neither its native `workflow_run` trigger nor its manual `workflow_dispatch` path has been exercised. CI run `43696552654` for commit `9719671` passed all five jobs, including the backend job (**543 passed, 2 skipped**). The focused local on-call suite is **95 passed, 2 skipped**, and the local alerting suites are **90 passed**. A separate full local backend run reported 542 passed, 1 environment-specific database-driver failure, and 2 skipped; the failure was local/environment-specific and did not occur in CI.
 
 ### Verified snapshot — run `43174534132`, 2026-11-12
 
@@ -107,6 +126,7 @@ The observability work (C1–C3.2) was committed as `33b3e05df7453c35c3b7642473c
 - Savings archive/restore and loan repayment corrections have backend tests but no UI or E2E coverage because the UI does not expose those actions.
 - There are no Admin or rate-limiting tests because those features do not exist.
 - The PostgreSQL domain-event boundary tests (`backend/tests/test_domain_events_postgres.py`) skip when no test database is configured, so post-commit emission, replay suppression, archive/restore no-op suppression, and failed-write absence are unverified without one (finding M1).
+- The alerting and on-call workflows have zero GitHub Actions runs; native `workflow_run` triggering and manual `workflow_dispatch` are unverified. Only local CLI simulations and CI test execution exist.
 
 Full details are in `PROJECT_SPEC.md` §11.7.
 
@@ -145,12 +165,12 @@ This assessment uses repository evidence, not documentation claims alone. **Comp
 | 8 | Deployment | 2 | Complete | Live Cloudflare Pages frontend and Render backend; `/health` and `/ready` verified 2026-11-13 at commit `45527ff`; Neon documented | Neon was not directly probed; Pages root was not re-probed from the authoring network |
 | 9 | CI/CD | 3 | Partial | Five-job CI workflow (backend, frontend, Playwright E2E, Docker image builds, and backend container staging-lite) is green on push and pull request, with read-only permissions and uploaded artifacts | No CD automation exists; deployment is provider-driven/manual. Add a deploy workflow or document the release procedure |
 | 10 | Observability | 2 | Partial | Structured JSON request logs with `X-Request-ID` correlation, durations, slow-request warnings above 1000 ms, and redaction; privacy-safe allowlisted domain events; a dependency-free Prometheus-format metrics registry with HTTP request, duration, and slow-request metrics and a protected `/metrics` endpoint (C1–C3.2, commit `33b3e05`); `/health` and `/ready`; coverage in `backend/tests/test_observability.py`, `backend/tests/test_metrics.py`, and `backend/tests/test_http_metrics.py` | Metrics remain disabled in production, and there is no tracing, dashboard, log aggregation/retention, or documented SLO; user-impact alerting is implemented locally but not yet active (see #11) |
-| 11 | Alerting on User Impact | 1 | Partial | Four synthetic production probes (`frontend`, `backend_health`, `backend_ready`, `auth_smoke`) with a pure evaluator, a standard-library runner, retries, a 90-second budget, and an hourly schedule/manual workflow; 65 evaluator + 25 runner tests pass | Activation is pending: merge the workflow to the default branch, enable Actions, and complete a green scheduled or manual production run. Until then it is not live coverage |
-| 12 | On-Call Agent | 2 | Missing | No on-call rotation, alert-linked runbooks, or automated responder | Define an on-call process and runbooks, and connect them to alerts |
+| 11 | Alerting on User Impact | 1 | Partial | Four synthetic production probes (`frontend`, `backend_health`, `backend_ready`, `auth_smoke`) with a pure evaluator, a standard-library runner, retries, a 90-second budget, and an hourly schedule/manual workflow; 65 evaluator + 25 runner tests pass; the workflow is merged and registered but has zero runs | Activation is pending a green scheduled or manual production run; it is not live coverage yet |
+| 12 | On-Call Agent | 2 | Partial | A Tier 1 deterministic on-call agent is implemented and committed at `9719671`: a read-only `workflow_run` diagnosis workflow, a rule-based classifier for probe/error categories, escalation for provider/readiness/authentication faults, fixture-only patch generation and verification, and `docs/ONCALL_RUNBOOK.md`; CI run `43696552654` passed all five jobs for commit `9719671` (backend: 543 passed, 2 skipped); the focused local on-call suite is 95 passed/2 skipped, the local alerting suites are 90 passed, and local CLI simulations verified frontend repair, authentication repair, and readiness escalation. The GitHub Actions on-call workflow has zero runs | Native automatic `workflow_run` triggering is not yet verified; no manual `workflow_dispatch` run has been executed; no on-call rotation, ownership assignment, or acknowledgement/escalation process is defined; the responder is deterministic, not an LLM. Exercise the workflow, verify native triggering, define ownership/rotation, and assess whether the rubric expects an AI/LLM agent |
 
-**Status arithmetic:** 7 criteria complete = 14 points documented; 4 criteria partial = up to 8 additional points (#2 Product Specification up to 2, #9 CI/CD up to 3, #10 Observability up to 2, #11 Alerting up to 1); 1 criterion missing (On-Call Agent) = 0 points. The current maximum without completing On-Call Agent is therefore **22/24**, not 24/24. This is a potential maximum, not an awarded score: partial criteria may receive less than full credit, so an estimated current score could be lower. The previously reported **14/24** is retained only as historical context. The verified implementation floor from the six application/testing/deployment criteria remains 12/24, and the Agent Team Specification and Context Management entries rest on repository documentation rather than a grader award.
+**Status arithmetic:** 7 criteria complete = **14 confirmed points**; 5 criteria partial = up to **10 potential points** (#2 Product Specification up to 2, #9 CI/CD up to 3, #10 Observability up to 2, #11 Alerting up to 1, #12 On-Call Agent up to 2); 0 criteria missing. The potential ceiling is **24/24** if every partial criterion receives full credit, but this is a ceiling, not an awarded score, and partial credit may be lower. Criterion 12 moved from Missing to Partial based on the committed Tier 1 implementation and verification evidence, not documentation alone; the confirmed total remains **14/24**, and the estimated range is **14–24**, depending on partial credit. The previously reported **14/24** is retained only as historical context. No single awarded total is asserted because partial-credit treatment is grader-dependent; the Agent Team Specification and Context Management entries rest on repository documentation rather than a grader award.
 
-**Documentation evidence, not an awarded score.** The Agent Team Specification and Context Management rows point to repository artifacts, not to an official evaluation. Their status depends on `AGENTS.md`, `AI_WORKFLOW.md`, and the referenced documents being included in the submitted repository and on the grader's assessment. This update produced no new test, deployment, or runtime evidence.
+**Documentation evidence, not an awarded score.** The Agent Team Specification and Context Management rows point to repository artifacts, not to an official evaluation. Their status depends on `AGENTS.md`, `AI_WORKFLOW.md`, and the referenced documents being included in the submitted repository and on the grader's assessment. The On-Call Agent row is supported by the committed implementation, CI run `43696552654`, local focused tests, and local CLI simulations, but the GitHub Actions on-call workflow has zero runs and its native automatic trigger remains unverified. Criterion 2 remains Partial: the On-Call Agent work was not tracked through the public board, so the missing implementation-task tracker evidence is unchanged.
 
 ## 7. Known Limitations and Deferred Features
 
@@ -183,7 +203,7 @@ This assessment uses repository evidence, not documentation claims alone. **Comp
 - No automated backup/restore verification is documented.
 - Public API docs are disabled in production.
 - Email verification in production depends on Resend configuration and a verified sender domain.
-- In-process metrics exist but are disabled in production by default; there is no tracing or on-call tooling. User-impact alerting is implemented in the repository but is not yet active in production.
+- In-process metrics exist but are disabled in production by default; there is no tracing or dashboard/log aggregation. User-impact alerting and the Tier 1 deterministic on-call agent are implemented in the repository but are not yet active or fully verified in production.
 - Metrics are in-process only: counters reset on process restart and are not shared across multiple backend instances.
 - Playwright covers Chromium only; no load, stress, or penetration tests are in CI.
 
@@ -199,6 +219,15 @@ The combined observability review (C1–C3.2) raised one medium and four low fin
 - **L3 (Low):** post-commit `log_domain_event` calls are not defensively wrapped, so a logging failure could surface as a sanitized `500` after a successful write.
 - **L4 (Low):** the slow-request threshold and HTTP metrics read module-global `settings` rather than a per-app configuration object.
 
+### On-Call Agent limitations (Tier 1)
+
+- **Automatic triggering is not yet verified.** The `workflow_run` workflow is configured and statically validated, but no failure-triggered run has been observed. The on-call workflow has zero GitHub Actions runs; only local CLI simulations are verified.
+- **Repairs are fixture-only.** The agent never modifies production application code; production failures are diagnosed and escalated for human remediation.
+- **Deterministic, not an LLM.** Unknown failures escalate; there is no AI reasoning or autonomous remediation.
+- **No on-call rotation or ownership process.** Escalation currently targets the owner; there is no paging rotation, acknowledgement expectation, or formal escalation path.
+- **No notification of its own.** It publishes an artifact and job summary; the failed alerting run's native notification remains the alert.
+- **The GitHub Actions on-call workflow has not been run.** Neither the native `workflow_run` trigger nor a manual `workflow_dispatch` has been exercised; only local CLI simulations exist. CI run `43696552654` did pass the on-call tests as part of the backend suite (543 passed, 2 skipped).
+
 ## 8. Remaining Work and Priorities
 
 ### Rubric priorities
@@ -207,8 +236,8 @@ The combined observability review (C1–C3.2) raised one medium and four low fin
 2. **Context Management** — documentation evidence is now in `AGENTS.md` (precedence, refresh/handoff, update matrix, completion report) and `AI_WORKFLOW.md`; include both in the submitted repository.
 3. **CI/CD** — add automated deployment or document a repeatable manual release procedure with required secrets and approvals.
 4. **Observability** — request-ID correlation, structured domain events, and an in-process metrics registry are implemented and CI-verified (commit `33b3e05`), but metrics are disabled in production. Remaining: decide whether to activate production metrics and how to scrape them, resolve the open findings M1 and L1–L4, and add tracing, dashboards, log aggregation/retention, and explicit SLOs.
-5. **Alerting on User Impact** — the evaluator, runner, tests, and hourly workflow are implemented locally. Remaining: merge the workflow to the default branch, enable Actions, and record a green scheduled or manual production run (see `docs/ALERTING_RUNBOOK.md`). On-call routing remains part of #12.
-6. **On-Call Agent** — define a rotation, runbooks, and an alert-linked response process.
+5. **Alerting on User Impact** — the evaluator, runner, tests, and hourly workflow are implemented locally. Remaining: record a green scheduled or manual production run; the workflow is merged and registered but has zero runs (see `docs/ALERTING_RUNBOOK.md`). On-call routing remains part of #12.
+6. **On-Call Agent** — the Tier 1 deterministic responder and runbook are implemented at `9719671`. Remaining: exercise the on-call workflow (manual `workflow_dispatch` or a native failed alerting run), verify native `workflow_run` triggering, define ownership/rotation/acknowledgement, and decide whether the rubric expects an AI/LLM agent rather than the deterministic responder. Do not mark Complete until those gaps close.
 
 ### Product and security backlog
 
@@ -245,12 +274,21 @@ A public GitHub Projects v2 board, [FinPath — Development Tracker](https://git
 | `backend/tests/test_alerting.py`, `backend/tests/test_alerting_runner.py` | Focused evaluator and runner tests (65 + 25) |
 | `.github/workflows/alerting.yml` | Hourly scheduled and manual production probe workflow |
 | `docs/ALERTING_RUNBOOK.md` | Probe behavior, severities, retries, investigation, and activation steps |
+| `backend/app/core/oncall_agent.py` | Deterministic on-call classifier, repair allowlist, patch generation, and verification gating |
+| `backend/tests/test_oncall_agent.py` | 95 passed / 2 skipped focused on-call tests |
+| `backend/tests/fixtures/oncall/` | Intentionally broken fixtures for controlled repair simulation |
+| `.github/workflows/oncall-agent.yml` | Read-only `workflow_run`/`workflow_dispatch` on-call diagnosis workflow |
+| `docs/ONCALL_RUNBOOK.md` | On-call classification, fixture repairs, verification, security, and limitations |
 | [FinPath — Development Tracker](https://github.com/users/alicephoo/projects/1) | Public Projects v2 board with draft tasks, acceptance criteria, agent roles, and evidence |
 | `compose.yaml`, `backend/Dockerfile`, `frontend/Dockerfile` | Containerization evidence |
 | `frontend/e2e/`, `frontend/playwright.config.ts` | Playwright specs and serial test configuration |
 | [CI run `43174534132`](https://github.com/alicephoo/FinPath_Website/actions/runs/43174534132) | Dated test counts and green CI evidence |
+| [CI run `43696552654`](https://github.com/alicephoo/FinPath_Website/actions/runs/43696552654) | Latest CI evidence for commit `9719671`; all five jobs green, backend 543 passed / 2 skipped |
+| [Alerting workflow](https://github.com/alicephoo/FinPath_Website/actions/workflows/alerting.yml) | Workflow page; zero runs as of 2026-11-15T11:42Z |
+| [On-call workflow](https://github.com/alicephoo/FinPath_Website/actions/workflows/oncall-agent.yml) | Workflow page; zero runs as of 2026-11-15T11:42Z |
 | Git commit `45527fffe2fa36e4a0c90dd4f9592aff188be1bf` | Deployment and CI commit; `HEAD` = `origin/main` at verification |
 | Git commit `33b3e05df7453c35c3b7642473c8f0134fcf1619` | Observability (C1–C3.2) commit, `feat: add end-to-end observability`; pushed to `origin/main` |
+| Git commit `9719671` | On-Call Agent commit, `feat: add deterministic on-call agent`; pushed to `origin/main` |
 
 ### Verification method and scope
 
@@ -261,3 +299,4 @@ A public GitHub Projects v2 board, [FinPath — Development Tracker](https://git
 - The 2026-11-15 documentation update recorded the observability implementation and CI verification at commit `33b3e05` across `PROGRESS.md`, `PROJECT_SPEC.md`, `README.md`, `backend/README.md`, and `frontend/README.md`. It changed only documentation; no code, tests, configuration, environment variables, database, Docker state, Git history, or provider settings were changed; nothing was staged, committed, pushed, or deployed by this update.
 - The 2026-11-15 alerting work added `backend/app/core/alerting.py`, `backend/app/core/alerting_runner.py`, their focused tests, `.github/workflows/alerting.yml`, and `docs/ALERTING_RUNBOOK.md` (Phase 2A–2C). The Phase 2D documentation pass changed only documentation (`PROGRESS.md`, `README.md`, `PROJECT_SPEC.md`, and the runbook). The workflow was not executed against production, and no environment, provider, database, or deployment setting was changed; nothing was staged, committed, pushed, or deployed.
 - The 2026-11-15 tracker update created the public [FinPath — Development Tracker](https://github.com/users/alicephoo/projects/1) and six draft items. It created no GitHub Issues, pull requests, labels, or milestones, and changed no repository files. Public visibility was verified with `gh project view` and an unauthenticated HTTP 200.
+- The 2026-11-15 on-call work committed `9719671` (`feat: add deterministic on-call agent`) with a read-only diagnosis workflow, deterministic classifier, focused tests, and fixture-only repair verification. CI run `43696552654` for that commit passed all five jobs (backend 543 passed, 2 skipped); the alerting and on-call workflows have zero GitHub Actions runs; local CLI simulations verified the frontend repair, authentication repair, and readiness escalation, while native `workflow_run` and manual `workflow_dispatch` triggering were not verified. This README/PROGRESS documentation update changed only `README.md` and `PROGRESS.md`; no implementation, workflow, configuration, secret, database, or provider changes were made, and nothing was staged, committed, pushed, or deployed.
