@@ -1,7 +1,7 @@
 # FinPath Progress
 
 **Last updated:** 2026-11-15
-**Current status:** Implemented for the documented in-scope features and live in production. End-to-end observability (request-ID correlation, structured domain events, and an in-process metrics registry) is implemented and CI-verified at commit `33b3e05`, with metrics disabled in production by default. Deferred items are listed in [Section 7](#7-known-limitations-and-deferred-features).
+**Current status:** Implemented for the documented in-scope features and live in production. End-to-end observability (request-ID correlation, structured domain events, and an in-process metrics registry) is implemented and CI-verified at commit `33b3e05`, with metrics disabled in production by default. User-impact alerting (Phase 2A–2C) is implemented in the repository but is **not yet active**: the hourly workflow takes effect only after it is committed to the default branch and a run succeeds. See [docs/ALERTING_RUNBOOK.md](docs/ALERTING_RUNBOOK.md). Deferred items are listed in [Section 7](#7-known-limitations-and-deferred-features).
 **Authoritative specification:** [PROJECT_SPEC.md](PROJECT_SPEC.md). This log summarizes progress and evidence; it does not override the specification.
 **Public overview:** [README.md](README.md).
 
@@ -16,10 +16,11 @@ FinPath is a full-stack personal finance and goal-planning web application for t
 | Application (documented scope) | Implemented — five tabs, backend-owned financial rules, PostgreSQL persistence |
 | Automated tests | Green in CI — backend, frontend, Playwright, Docker image build, and container smoke jobs |
 | Observability (C1–C3.2) | Implemented and CI-verified at commit `33b3e05` — request-ID correlation, structured domain events, and a Prometheus-format metrics registry with a protected `/metrics` endpoint; metrics disabled in production by default |
+| User-impact alerting (Phase 2A–2C) | Implemented locally, not active — four synthetic probes, a pure evaluator, a standard-library runner, 90 focused tests, and an hourly GitHub Actions workflow; activation pending default-branch merge and a successful run |
 | CI | Green — run `43174534132`, 2026-11-12 |
 | Deployment | Live — Cloudflare Pages frontend and Render backend verified 2026-11-12; `/health` and `/ready` re-probed 2026-11-13 |
-| Documentation | `PROJECT_SPEC.md` is authoritative; `README.md` is current; `AGENTS.md` defines agent context and collaboration; this progress log was refreshed 2026-11-14 |
-| Zoomcamp rubric | 8 criteria complete (six implementation criteria plus two documentation criteria), 2 partial, 2 missing — see [Section 6](#6-ai-dev-tools-zoomcamp-rubric-status) |
+| Documentation | `PROJECT_SPEC.md` is authoritative; `README.md` is current; `AGENTS.md` defines agent context and collaboration; `docs/ALERTING_RUNBOOK.md` documents alerting; this progress log was refreshed 2026-11-15 |
+| Zoomcamp rubric | 8 criteria complete (six implementation criteria plus two documentation criteria), 3 partial, 1 missing — see [Section 6](#6-ai-dev-tools-zoomcamp-rubric-status) |
 | Deferred scope | Admin, rate limiting, MFA, RLS, and several API-only UI flows — see [Section 7](#7-known-limitations-and-deferred-features) |
 
 ## 2. Completed Milestones
@@ -36,6 +37,7 @@ FinPath is a full-stack personal finance and goal-planning web application for t
 | 2026-11-14 | Added `AGENTS.md` and integrated it with `AI_WORKFLOW.md` to document the six-agent team, context precedence, handoffs, and approval gates | `AGENTS.md`; `AI_WORKFLOW.md`; `README.md` documentation table |
 | 2026-11-15 | End-to-end observability (C1–C3.2) committed as `33b3e05df7453c35c3b7642473c8f0134fcf1619` with message `feat: add end-to-end observability` and pushed to `origin/main` | Git `HEAD` = `origin/main` at the same commit |
 | 2026-11-15 | GitHub Actions reported all five CI jobs passing for commit `33b3e05` (confirmed by the project owner; no run ID or URL supplied) | User confirmation; `.github/workflows/ci.yml` |
+| 2026-11-15 | User-impact alerting implemented locally (Phase 2A–2C): pure evaluator, standard-library probe runner, focused tests, and an hourly GitHub Actions workflow. Not yet active | `backend/app/core/alerting.py`, `backend/app/core/alerting_runner.py`, `backend/tests/test_alerting.py`, `backend/tests/test_alerting_runner.py`, `.github/workflows/alerting.yml`, `docs/ALERTING_RUNBOOK.md`; 65 evaluator + 25 runner tests pass in the focused run |
 
 ## 3. Current Implementation Status
 
@@ -56,6 +58,7 @@ Status reflects `PROJECT_SPEC.md` Appendix A and the implemented API/UI surface.
 | PostgreSQL persistence | Implemented | 20 tables, 6 Alembic revisions, seeded roles and categories |
 | ETags and idempotency | Implemented | `If-Match` concurrency protection and scoped 24-hour idempotency records |
 | Observability (C1–C3.2) | Implemented | `X-Request-ID` correlation end to end; allowlisted structured domain events; dependency-free metrics registry; HTTP request, duration, and slow-request metrics; protected `/metrics`; disabled by default |
+| User-impact alerting (Phase 2A–2C) | Implemented locally, not active | Four production probes (`frontend`, `backend_health`, `backend_ready`, `auth_smoke`), pure evaluator, standard-library runner with one retry and a 90-second budget, hourly workflow; activation pending default-branch merge and a successful run |
 | Admin console, role management, audit UI | Deferred | Admin role and append-only audit table exist in the schema; no Admin API or UI |
 | Rate limiting | Not implemented | No request throttling or `429` handling |
 | MFA, passkeys, social login, email change, RLS | Deferred | Not implemented |
@@ -76,6 +79,10 @@ Status reflects `PROJECT_SPEC.md` Appendix A and the implemented API/UI surface.
 | Backend container staging-lite | Runs the built backend image against a disposable PostgreSQL 17 database, applies migrations, and checks `/health`, `/ready`, and a non-mutating invalid-login smoke test |
 
 The workflow uploads Pytest and Playwright reports as artifacts. It does not deploy or create cloud resources.
+
+### Alerting workflow
+
+`.github/workflows/alerting.yml` is a separate scheduled monitoring workflow. It runs hourly (`0 * * * *` UTC) and on manual `workflow_dispatch`, with `contents: read` permission, a 3-minute job timeout, and no push or pull-request triggers. It runs `python -m app.core.alerting_runner` from `backend` on Python 3.12 with no dependency install, and a non-zero runner exit fails the job. It does not deploy. The workflow is **not yet active**: it takes effect only after being merged to the default branch and completing a successful run, as described in `docs/ALERTING_RUNBOOK.md`.
 
 ### Verified snapshot — run `43174534132`, 2026-11-12
 
@@ -136,11 +143,11 @@ This assessment uses repository evidence, not documentation claims alone. **Comp
 | 7 | Containerization | 2 | Complete | `backend/Dockerfile` (Python 3.12 slim, non-root), `frontend/Dockerfile` (build + Nginx), `compose.yaml` with PostgreSQL health check and role initialization | CI does not build images; optional addition |
 | 8 | Deployment | 2 | Complete | Live Cloudflare Pages frontend and Render backend; `/health` and `/ready` verified 2026-11-13 at commit `45527ff`; Neon documented | Neon was not directly probed; Pages root was not re-probed from the authoring network |
 | 9 | CI/CD | 3 | Partial | Five-job CI workflow (backend, frontend, Playwright E2E, Docker image builds, and backend container staging-lite) is green on push and pull request, with read-only permissions and uploaded artifacts | No CD automation exists; deployment is provider-driven/manual. Add a deploy workflow or document the release procedure |
-| 10 | Observability | 2 | Partial | Structured JSON request logs with `X-Request-ID` correlation, durations, slow-request warnings above 1000 ms, and redaction; privacy-safe allowlisted domain events; a dependency-free Prometheus-format metrics registry with HTTP request, duration, and slow-request metrics and a protected `/metrics` endpoint (C1–C3.2, commit `33b3e05`); `/health` and `/ready`; coverage in `backend/tests/test_observability.py`, `backend/tests/test_metrics.py`, and `backend/tests/test_http_metrics.py` | Metrics remain disabled in production, and there is no tracing, dashboard, log aggregation/retention, alerting, or documented SLO |
-| 11 | Alerting on User Impact | 1 | Missing | No alert rules or user-impact monitoring; only provider health checks exist | Define user-impact signals (error rate, latency, readiness, auth failures) and alerts with escalation |
+| 10 | Observability | 2 | Partial | Structured JSON request logs with `X-Request-ID` correlation, durations, slow-request warnings above 1000 ms, and redaction; privacy-safe allowlisted domain events; a dependency-free Prometheus-format metrics registry with HTTP request, duration, and slow-request metrics and a protected `/metrics` endpoint (C1–C3.2, commit `33b3e05`); `/health` and `/ready`; coverage in `backend/tests/test_observability.py`, `backend/tests/test_metrics.py`, and `backend/tests/test_http_metrics.py` | Metrics remain disabled in production, and there is no tracing, dashboard, log aggregation/retention, or documented SLO; user-impact alerting is implemented locally but not yet active (see #11) |
+| 11 | Alerting on User Impact | 1 | Partial | Four synthetic production probes (`frontend`, `backend_health`, `backend_ready`, `auth_smoke`) with a pure evaluator, a standard-library runner, retries, a 90-second budget, and an hourly schedule/manual workflow; 65 evaluator + 25 runner tests pass | Activation is pending: merge the workflow to the default branch, enable Actions, and complete a green scheduled or manual production run. Until then it is not live coverage |
 | 12 | On-Call Agent | 2 | Missing | No on-call rotation, alert-linked runbooks, or automated responder | Define an on-call process and runbooks, and connect them to alerts |
 
-**Status arithmetic:** 8 criteria complete = 16 points documented; 2 criteria partial = up to 5 additional points; 2 criteria missing = 0 points. The previously reported **14/24** is retained only as historical context. No single total is asserted here because partial-credit treatment is grader-dependent; the verified implementation floor from the six application/testing/deployment criteria remains 12/24, and the Agent Team Specification and Context Management entries now rest on repository documentation rather than a grader award.
+**Status arithmetic:** 8 criteria complete = 16 points documented; 3 criteria partial = up to 6 additional points (#9 CI/CD up to 3, #10 Observability up to 2, #11 Alerting up to 1); 1 criterion missing = 0 points. The previously reported **14/24** is retained only as historical context. No single total is asserted here because partial-credit treatment is grader-dependent; the verified implementation floor from the six application/testing/deployment criteria remains 12/24, and the Agent Team Specification and Context Management entries now rest on repository documentation rather than a grader award.
 
 **Documentation evidence, not an awarded score.** The Agent Team Specification and Context Management rows point to repository artifacts, not to an official evaluation. Their status depends on `AGENTS.md`, `AI_WORKFLOW.md`, and the referenced documents being included in the submitted repository and on the grader's assessment. This update produced no new test, deployment, or runtime evidence.
 
@@ -175,7 +182,7 @@ This assessment uses repository evidence, not documentation claims alone. **Comp
 - No automated backup/restore verification is documented.
 - Public API docs are disabled in production.
 - Email verification in production depends on Resend configuration and a verified sender domain.
-- In-process metrics exist but are disabled in production by default; there is no tracing, alerting, or on-call tooling.
+- In-process metrics exist but are disabled in production by default; there is no tracing or on-call tooling. User-impact alerting is implemented in the repository but is not yet active in production.
 - Metrics are in-process only: counters reset on process restart and are not shared across multiple backend instances.
 - Playwright covers Chromium only; no load, stress, or penetration tests are in CI.
 
@@ -199,7 +206,7 @@ The combined observability review (C1–C3.2) raised one medium and four low fin
 2. **Context Management** — documentation evidence is now in `AGENTS.md` (precedence, refresh/handoff, update matrix, completion report) and `AI_WORKFLOW.md`; include both in the submitted repository.
 3. **CI/CD** — add automated deployment or document a repeatable manual release procedure with required secrets and approvals.
 4. **Observability** — request-ID correlation, structured domain events, and an in-process metrics registry are implemented and CI-verified (commit `33b3e05`), but metrics are disabled in production. Remaining: decide whether to activate production metrics and how to scrape them, resolve the open findings M1 and L1–L4, and add tracing, dashboards, log aggregation/retention, and explicit SLOs.
-5. **Alerting on User Impact** — define user-impact signals and alert routing.
+5. **Alerting on User Impact** — the evaluator, runner, tests, and hourly workflow are implemented locally. Remaining: merge the workflow to the default branch, enable Actions, and record a green scheduled or manual production run (see `docs/ALERTING_RUNBOOK.md`). On-call routing remains part of #12.
 6. **On-Call Agent** — define a rotation, runbooks, and an alert-linked response process.
 
 ### Product and security backlog
@@ -232,6 +239,11 @@ GitHub Issues were intentionally skipped; no issue tracker, labels, milestones, 
 | `backend/tests/test_http_metrics.py` | HTTP instrumentation and protected `/metrics` endpoint tests |
 | `backend/tests/test_domain_events_postgres.py` | PostgreSQL domain-event boundary tests (skip without a configured test database) |
 | `backend/app/main.py` | Router registration, `/health`, `/ready`, middleware |
+| `backend/app/core/alerting.py` | Pure evaluator: canonical requiredness, severity, duplicate/missing-probe handling, and allowlisted diagnostics |
+| `backend/app/core/alerting_runner.py` | Four production probes, retry policy, 90-second budget, and exit codes |
+| `backend/tests/test_alerting.py`, `backend/tests/test_alerting_runner.py` | Focused evaluator and runner tests (65 + 25) |
+| `.github/workflows/alerting.yml` | Hourly scheduled and manual production probe workflow |
+| `docs/ALERTING_RUNBOOK.md` | Probe behavior, severities, retries, investigation, and activation steps |
 | `compose.yaml`, `backend/Dockerfile`, `frontend/Dockerfile` | Containerization evidence |
 | `frontend/e2e/`, `frontend/playwright.config.ts` | Playwright specs and serial test configuration |
 | [CI run `43174534132`](https://github.com/alicephoo/FinPath_Website/actions/runs/43174534132) | Dated test counts and green CI evidence |
@@ -245,3 +257,4 @@ GitHub Issues were intentionally skipped; no issue tracker, labels, milestones, 
 - Tests, migrations, Docker builds, and deployments were not run for the 2026-11-14 documentation updates.
 - The 2026-11-14 documentation update created `AGENTS.md` and edited `AI_WORKFLOW.md`, `README.md`, and `PROGRESS.md`. No code, tests, configuration, environment variables, database, Docker state, Git history, or provider settings were changed; nothing was staged, committed, pushed, or deployed.
 - The 2026-11-15 documentation update recorded the observability implementation and CI verification at commit `33b3e05` across `PROGRESS.md`, `PROJECT_SPEC.md`, `README.md`, `backend/README.md`, and `frontend/README.md`. It changed only documentation; no code, tests, configuration, environment variables, database, Docker state, Git history, or provider settings were changed; nothing was staged, committed, pushed, or deployed by this update.
+- The 2026-11-15 alerting work added `backend/app/core/alerting.py`, `backend/app/core/alerting_runner.py`, their focused tests, `.github/workflows/alerting.yml`, and `docs/ALERTING_RUNBOOK.md` (Phase 2A–2C). The Phase 2D documentation pass changed only documentation (`PROGRESS.md`, `README.md`, `PROJECT_SPEC.md`, and the runbook). The workflow was not executed against production, and no environment, provider, database, or deployment setting was changed; nothing was staged, committed, pushed, or deployed.

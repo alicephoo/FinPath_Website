@@ -1,0 +1,42 @@
+name: FinPath production alerting
+
+# Hourly synthetic monitoring of the production FinPath deployment. A failed
+# run is the alert; GitHub Actions' native failed-workflow notification is the
+# delivery mechanism. There are no push or pull-request triggers.
+on:
+  schedule:
+    - cron: "0 * * * *" # every hour, on the hour (UTC)
+  workflow_dispatch:
+
+# Read-only repository access is sufficient: this workflow only checks out the
+# repository and runs the standard-library probe runner. It never pushes,
+# deploys, or creates cloud resources, and it uses no secrets.
+permissions:
+  contents: read
+
+# Prevent overlapping probe runs if a manual dispatch coincides with a
+# scheduled run. The newer run waits rather than cancelling the active one.
+concurrency:
+  group: finpath-production-alerting
+  cancel-in-progress: false
+
+jobs:
+  alerting:
+    name: FinPath production alerting
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The runner uses only the Python standard library and the in-repo
+      # evaluator, so no dependency installation is needed. Its exit codes are
+      # preserved: a non-zero exit (an alert or runner failure) fails the job.
+      - name: Run FinPath production probes
+        working-directory: backend
+        run: python -m app.core.alerting_runner

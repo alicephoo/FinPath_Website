@@ -49,7 +49,7 @@ All money is stored and validated as whole-Kyat integers. A single financial ent
 | Frontend tests | Vitest 3, React Testing Library, jest-dom, jsdom |
 | Backend tests | Pytest 8 |
 | End-to-end tests | Playwright 1.48 (Chromium) |
-| CI | GitHub Actions |
+| CI | GitHub Actions (CI and scheduled alerting) |
 | Production hosting | Cloudflare Pages, Cloudflare Pages Functions, Render, Neon |
 
 ## Architecture
@@ -85,10 +85,12 @@ FinPath/
 │   └── Dockerfile           # Nginx image for local Compose
 ├── docker/postgres/         # Local role/init script
 ├── .github/workflows/ci.yml # CI: backend, frontend, E2E, Docker build, and staging-lite jobs
+├── .github/workflows/alerting.yml # Hourly production probes (manual dispatch; inactive until merged)
 ├── compose.yaml             # Local full-stack Docker Compose
 ├── PROJECT_SPEC.md          # Product specification (source of truth for behavior)
 ├── API_CONTRACTS.md         # Endpoint, error, ETag, and idempotency contracts
-└── BACKEND_ARCHITECTURE.md  # Schema, privilege matrix, and design decisions
+├── BACKEND_ARCHITECTURE.md  # Schema, privilege matrix, and design decisions
+└── docs/ALERTING_RUNBOOK.md # Alerting probes, severities, and investigation steps
 ```
 
 ## Prerequisites
@@ -293,7 +295,7 @@ Operational notes:
 - The Pages proxy preserves method, path, query, body, auth/CSRF/idempotency headers, and multiple `Set-Cookie` headers; it never accepts an upstream from the request.
 - Render uses `/health` as its health-check path; `/ready` reports database readiness. Startup migrations are disabled with `FINPATH_RUN_STARTUP_MIGRATIONS=false`.
 - Migrations are applied separately with `FINPATH_MIGRATION_DATABASE_URL` as `finpath_migrator` against a direct Neon connection.
-- GitHub Actions only builds and tests; it does not deploy.
+- GitHub Actions builds and tests through `ci.yml` and also hosts the separate hourly alerting workflow; neither workflow deploys.
 
 ## Observability
 
@@ -303,7 +305,9 @@ FinPath correlates and describes its own runtime behavior without external monit
 - **Structured domain events** — the backend emits allowlisted, privacy-safe domain events, such as login outcomes and transaction, loan, savings, travel, and report actions. Event names and authentication-failure reasons are fixed, messages are static, and no user or financial data is included.
 - **Prometheus metrics** — the backend registers bounded HTTP request, request-duration, and slow-request metrics in the Prometheus text format. Route, method, and status labels come from fixed vocabularies, so raw paths, identifiers, and amounts never become labels.
 
-The metrics endpoint (`/metrics`) is **disabled by default** and is protected by an optional bearer token; when enabled without a valid token it fails closed. No metrics are currently collected in production, and there is no monitoring dashboard, tracing platform, or alerting system. Metrics are held in process, so counters reset when the backend restarts and are not shared across instances.
+The metrics endpoint (`/metrics`) is **disabled by default** and is protected by an optional bearer token; when enabled without a valid token it fails closed. No metrics are currently collected in production, and there is no monitoring dashboard or tracing platform. Metrics are held in process, so counters reset when the backend restarts and are not shared across instances.
+
+**User-impact alerting.** Four synthetic probes (`frontend`, `backend_health`, `backend_ready`, `auth_smoke`) check the production deployment hourly, and a failed workflow run is the alert. The evaluator, standard-library runner, and GitHub Actions workflow are implemented in the repository, but scheduled alerting is **not yet active**: it begins only after the workflow is merged to the default branch and a run succeeds. See [docs/ALERTING_RUNBOOK.md](docs/ALERTING_RUNBOOK.md) for probes, severities, retries, exit codes, and safe investigation steps.
 
 ## Security and Data Handling
 
@@ -346,6 +350,7 @@ Financial data is stored in PostgreSQL and survives refreshes, restarts, and sig
 | [backend/README.md](backend/README.md) | Detailed backend setup, API reference, and database roles |
 | [AGENTS.md](AGENTS.md) | Repository instructions for AI agents: context precedence, agent team, workflow, safety, and approval gates |
 | [AI_WORKFLOW.md](AI_WORKFLOW.md) | AI-assisted development workflow |
+| [docs/ALERTING_RUNBOOK.md](docs/ALERTING_RUNBOOK.md) | Production alerting probes, severities, retries, exit codes, investigation, and activation |
 | [TASKS.md](TASKS.md) | Historical ordered task checklist |
 | [PROGRESS.md](PROGRESS.md) | Current progress, dated evidence, and rubric status; `PROJECT_SPEC.md` is authoritative for current behavior |
 

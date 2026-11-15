@@ -786,8 +786,20 @@ End-to-end observability is implemented (C1–C3.2, commit `33b3e05df7453c35c3b7
 **Configuration and production status.**
 
 - `metrics_enabled` defaults to `false`; `metrics_token` defaults to `None`. Enabling metrics without a token does not crash startup; the endpoint fails closed.
-- No production metrics configuration has been enabled or changed, and no scrape path, dashboard, alerting, or tracing integration exists.
+- No production metrics configuration has been enabled or changed, and no scrape path, dashboard, or tracing integration exists. User-impact alerting is separate from metrics and is implemented in the repository but is not yet active; see Section 10.9.
 - Metrics are in-process only: counters reset on process restart and are not shared across multiple backend instances.
+
+### 10.9 User-impact alerting
+
+A user-impact alerting capability is implemented in the repository but is **not yet active**. Scheduled monitoring begins only after `.github/workflows/alerting.yml` is committed to the default branch and a run succeeds.
+
+- Four synthetic production probes run hourly: frontend availability (`GET https://finpath-website.pages.dev/`, HTTP 200, `Content-Type: text/html`, body contains `id="root"`), backend liveness (`GET https://finpath-website.onrender.com/health`, JSON `{"status":"ok"}`), backend readiness (`GET https://finpath-website.onrender.com/ready`, JSON `{"status":"ready"}`), and a non-mutating invalid-login smoke test through the Pages proxy (`POST https://finpath-website.pages.dev/api/v1/auth/login`, HTTP 401 with `error.code == "authentication_failed"`).
+- The authentication probe uses a reserved `alerting-probe@finpath.invalid` address, a dummy password, and `Origin: https://finpath-website.pages.dev`. It never uses a real account and never logs request bodies, emails, passwords, cookies, headers, or arbitrary response content.
+- A pure evaluator (`backend/app/core/alerting.py`) classifies failures. Frontend availability or backend-liveness failure is Critical; readiness or authentication-smoke failure is High. Monitoring and configuration faults (missing or duplicate probe results, infrastructure error kinds, an authentication `403`/`422`, or an exhausted budget) are capped at Medium so they are not reported as application outages. The highest severity across failures wins.
+- The runner retries once after 5 seconds for timeouts, transport errors, 5xx responses, and malformed/unusable responses, and never for definitive 4xx responses. A successful retry is reported as success. The run targets a 90-second budget; if exhausted, remaining probes report a Medium `monitoring_error`.
+- The workflow runs hourly (`0 * * * *` UTC) and on manual `workflow_dispatch`, with `contents: read`, no secrets or environment variables, and a 3-minute job timeout. It has no push or pull-request triggers. A non-zero runner exit fails the workflow, and GitHub Actions' native failed-workflow notification is the delivery mechanism.
+- No metrics scrape, dashboard, third-party notification service, automated remediation, or deployment step is part of this capability, and production metrics remain disabled.
+- Operational details, exit codes, investigation steps, and activation requirements are in `docs/ALERTING_RUNBOOK.md`.
 
 ---
 
@@ -972,6 +984,7 @@ The CI run executed against commit `45527fffe2fa36e4a0c90dd4f9592aff188be1bf` on
 | PostgreSQL persistence | Implemented | 20 tables, 6 Alembic revisions, seeded roles/categories |
 | Idempotency and ETags | Implemented | Scoped 24-hour records; `If-Match` protection |
 | Observability (C1–C3.2) | Implemented | `X-Request-ID` correlation, allowlisted domain events, Prometheus-format metrics registry, and protected `/metrics`; metrics disabled in production |
+| User-impact alerting | Implemented locally, not active | Four synthetic probes, pure evaluator, standard-library runner, and hourly workflow; activation pending default-branch merge and a successful run |
 | Admin console, role management, audit UI | Deferred | No endpoints or screens |
 | Rate limiting | Not implemented | Known security gap |
 | Email change, MFA, passkeys, social login | Deferred | Not implemented |
