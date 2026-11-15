@@ -1,4 +1,6 @@
-# FinPath Task Checklist
+# FinPath Historical Task Checklist
+
+> **Historical snapshot — not the active tracker.** Active work is tracked on the public [FinPath — Development Tracker](https://github.com/users/alicephoo/projects/1). This file preserves the original task IDs, phase ordering, and dated completion records. `[x]` means completed as recorded at the time; `[ ]` means not completed as of this historical snapshot. These checkboxes do not indicate current task status; see the board and `PROGRESS.md`.
 
 Task IDs and phase ordering define scope. The approved implementation sequence is to finish the Phase 2 frontend before beginning Phase 1 backend/database work; keep task numbering unchanged and do not mark skipped tasks complete. Complete and verify each implementation task before moving to the next. Do not pass an approval gate without user approval.
 

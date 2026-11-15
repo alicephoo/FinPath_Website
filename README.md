@@ -340,11 +340,16 @@ Financial data is stored in PostgreSQL and survives refreshes, restarts, and sig
 - **Playwright runs Chromium only.**
 - **Render free-tier cold starts** can delay the first request.
 
+## Task Tracking
+
+Active development tasks are tracked on the public [FinPath — Development Tracker](https://github.com/users/alicephoo/projects/1). Each draft task records its context, scope and non-goals, acceptance criteria, responsible agent role, and implementation/verification evidence. `TASKS.md` is a historical checklist; current task status lives on the board and in `PROGRESS.md`.
+
 ## Documentation
 
 | Document | Contents |
 |---|---|
 | [PROJECT_SPEC.md](PROJECT_SPEC.md) | Product specification, financial rules, requirements, and verified status |
+| [FinPath — Development Tracker](https://github.com/users/alicephoo/projects/1) | Public project board for active tasks, acceptance criteria, roles, and evidence |
 | [API_CONTRACTS.md](API_CONTRACTS.md) | Endpoint contracts, error envelopes, ETags, and idempotency |
 | [BACKEND_ARCHITECTURE.md](BACKEND_ARCHITECTURE.md) | Schema, protection matrix, and deferred design decisions |
 | [backend/README.md](backend/README.md) | Detailed backend setup, API reference, and database roles |

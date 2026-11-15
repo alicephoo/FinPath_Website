@@ -19,8 +19,8 @@ FinPath is a full-stack personal finance and goal-planning web application for t
 | User-impact alerting (Phase 2A–2C) | Implemented locally, not active — four synthetic probes, a pure evaluator, a standard-library runner, 90 focused tests, and an hourly GitHub Actions workflow; activation pending default-branch merge and a successful run |
 | CI | Green — run `43174534132`, 2026-11-12 |
 | Deployment | Live — Cloudflare Pages frontend and Render backend verified 2026-11-12; `/health` and `/ready` re-probed 2026-11-13 |
-| Documentation | `PROJECT_SPEC.md` is authoritative; `README.md` is current; `AGENTS.md` defines agent context and collaboration; `docs/ALERTING_RUNBOOK.md` documents alerting; this progress log was refreshed 2026-11-15 |
-| Zoomcamp rubric | 8 criteria complete (six implementation criteria plus two documentation criteria), 3 partial, 1 missing — see [Section 6](#6-ai-dev-tools-zoomcamp-rubric-status) |
+| Documentation | `PROJECT_SPEC.md` is authoritative; `README.md` is current; `AGENTS.md` defines agent context and collaboration; `docs/ALERTING_RUNBOOK.md` documents alerting; the public [FinPath — Development Tracker](https://github.com/users/alicephoo/projects/1) tracks active tasks; this progress log was refreshed 2026-11-15 |
+| Zoomcamp rubric | 7 criteria complete, 4 partial, 1 missing; current maximum 22/24 — see [Section 6](#6-ai-dev-tools-zoomcamp-rubric-status) |
 | Deferred scope | Admin, rate limiting, MFA, RLS, and several API-only UI flows — see [Section 7](#7-known-limitations-and-deferred-features) |
 
 ## 2. Completed Milestones
@@ -38,6 +38,7 @@ FinPath is a full-stack personal finance and goal-planning web application for t
 | 2026-11-15 | End-to-end observability (C1–C3.2) committed as `33b3e05df7453c35c3b7642473c8f0134fcf1619` with message `feat: add end-to-end observability` and pushed to `origin/main` | Git `HEAD` = `origin/main` at the same commit |
 | 2026-11-15 | GitHub Actions reported all five CI jobs passing for commit `33b3e05` (confirmed by the project owner; no run ID or URL supplied) | User confirmation; `.github/workflows/ci.yml` |
 | 2026-11-15 | User-impact alerting implemented locally (Phase 2A–2C): pure evaluator, standard-library probe runner, focused tests, and an hourly GitHub Actions workflow. Not yet active | `backend/app/core/alerting.py`, `backend/app/core/alerting_runner.py`, `backend/tests/test_alerting.py`, `backend/tests/test_alerting_runner.py`, `.github/workflows/alerting.yml`, `docs/ALERTING_RUNBOOK.md`; 65 evaluator + 25 runner tests pass in the focused run |
+| 2026-11-15 | Created and verified the public GitHub Projects v2 board [FinPath — Development Tracker](https://github.com/users/alicephoo/projects/1) with six draft tasks. No Issues, pull requests, labels, or milestones were created; no repository files changed | Board URL; `gh project view` (`public: true`, 6 items); unauthenticated HTTP 200; Todo/In Progress/Done status field |
 
 ## 3. Current Implementation Status
 
@@ -135,7 +136,7 @@ This assessment uses repository evidence, not documentation claims alone. **Comp
 | # | Criterion | Pts | Status | Evidence | Remaining work |
 |---|---|---|---|---|---|
 | 1 | Problem Description | 2 | Complete | `PROJECT_SPEC.md` §1.1 problem, §1.2 personas, §1.3 goals; README "The Problem" | None; keep aligned with product changes |
-| 2 | Product Specification | 2 | Complete | `PROJECT_SPEC.md`: 13 sections covering journeys, functional requirements, financial rules, API contracts, deployment, and acceptance criteria, plus Appendices A–B | None; treat it as the authority for behavior |
+| 2 | Product Specification | 2 | Partial | `PROJECT_SPEC.md` satisfies the written specification requirement: 13 sections covering journeys, functional requirements, financial rules, API contracts, deployment, and acceptance criteria (§11.5 `AC-1`–`AC-16`, §11.6 deferred criteria), plus Appendices A–B. The public [FinPath — Development Tracker](https://github.com/users/alicephoo/projects/1) exists with six draft tasks that include context, scope, acceptance criteria, and agent roles | Substantive agent usage through an implementation task has not yet been demonstrated; the board-setup item is the only agent update. Track a real task through Todo → In Progress → Done with verified evidence, then upgrade to Complete (documentation) |
 | 3 | Agent Team Specification | 2 | Complete (documentation) | `AGENTS.md` defines six roles with purpose, responsibilities, inputs/outputs, permitted areas, boundaries, invocation triggers, and reviewers, plus delegation, handoff, and conflict procedures; `AI_WORKFLOW.md` links the task loop to that team process | Evidence is prepared for evaluation; the score depends on `AGENTS.md` being included in the submitted repository and on grader assessment |
 | 4 | Context Management | 2 | Complete (documentation) | `AGENTS.md` defines documentation precedence, a context-refresh rule, a handoff template, a documentation-update matrix, verified commands, and a completion report; `PROGRESS.md` records status and evidence | Evidence is prepared for evaluation; the score depends on the referenced files being included in the submitted repository and on grader assessment |
 | 5 | Application | 2 | Complete | Five-tab full-stack application with implemented auth and financial APIs; live Pages and Render URLs | None for the documented scope |
@@ -147,7 +148,7 @@ This assessment uses repository evidence, not documentation claims alone. **Comp
 | 11 | Alerting on User Impact | 1 | Partial | Four synthetic production probes (`frontend`, `backend_health`, `backend_ready`, `auth_smoke`) with a pure evaluator, a standard-library runner, retries, a 90-second budget, and an hourly schedule/manual workflow; 65 evaluator + 25 runner tests pass | Activation is pending: merge the workflow to the default branch, enable Actions, and complete a green scheduled or manual production run. Until then it is not live coverage |
 | 12 | On-Call Agent | 2 | Missing | No on-call rotation, alert-linked runbooks, or automated responder | Define an on-call process and runbooks, and connect them to alerts |
 
-**Status arithmetic:** 8 criteria complete = 16 points documented; 3 criteria partial = up to 6 additional points (#9 CI/CD up to 3, #10 Observability up to 2, #11 Alerting up to 1); 1 criterion missing = 0 points. The previously reported **14/24** is retained only as historical context. No single total is asserted here because partial-credit treatment is grader-dependent; the verified implementation floor from the six application/testing/deployment criteria remains 12/24, and the Agent Team Specification and Context Management entries now rest on repository documentation rather than a grader award.
+**Status arithmetic:** 7 criteria complete = 14 points documented; 4 criteria partial = up to 8 additional points (#2 Product Specification up to 2, #9 CI/CD up to 3, #10 Observability up to 2, #11 Alerting up to 1); 1 criterion missing (On-Call Agent) = 0 points. The current maximum without completing On-Call Agent is therefore **22/24**, not 24/24. This is a potential maximum, not an awarded score: partial criteria may receive less than full credit, so an estimated current score could be lower. The previously reported **14/24** is retained only as historical context. The verified implementation floor from the six application/testing/deployment criteria remains 12/24, and the Agent Team Specification and Context Management entries rest on repository documentation rather than a grader award.
 
 **Documentation evidence, not an awarded score.** The Agent Team Specification and Context Management rows point to repository artifacts, not to an official evaluation. Their status depends on `AGENTS.md`, `AI_WORKFLOW.md`, and the referenced documents being included in the submitted repository and on the grader's assessment. This update produced no new test, deployment, or runtime evidence.
 
@@ -219,7 +220,7 @@ The combined observability review (C1–C3.2) raised one medium and four low fin
 12. Automated backup/restore verification for Neon.
 13. Broader E2E browser coverage and load/penetration testing.
 
-GitHub Issues were intentionally skipped; no issue tracker, labels, milestones, or projects should be created unless requested. This document and `PROJECT_SPEC.md` are the progress record.
+A public GitHub Projects v2 board, [FinPath — Development Tracker](https://github.com/users/alicephoo/projects/1), is the active task tracker. GitHub Projects draft items are used instead of GitHub Issues; Issues, labels, and milestones remain unused unless separately approved. `TASKS.md` remains a historical record, and this document plus `PROJECT_SPEC.md` remain the durable progress and specification record.
 
 ## 9. Verification Evidence and References
 
@@ -244,6 +245,7 @@ GitHub Issues were intentionally skipped; no issue tracker, labels, milestones, 
 | `backend/tests/test_alerting.py`, `backend/tests/test_alerting_runner.py` | Focused evaluator and runner tests (65 + 25) |
 | `.github/workflows/alerting.yml` | Hourly scheduled and manual production probe workflow |
 | `docs/ALERTING_RUNBOOK.md` | Probe behavior, severities, retries, investigation, and activation steps |
+| [FinPath — Development Tracker](https://github.com/users/alicephoo/projects/1) | Public Projects v2 board with draft tasks, acceptance criteria, agent roles, and evidence |
 | `compose.yaml`, `backend/Dockerfile`, `frontend/Dockerfile` | Containerization evidence |
 | `frontend/e2e/`, `frontend/playwright.config.ts` | Playwright specs and serial test configuration |
 | [CI run `43174534132`](https://github.com/alicephoo/FinPath_Website/actions/runs/43174534132) | Dated test counts and green CI evidence |
@@ -258,3 +260,4 @@ GitHub Issues were intentionally skipped; no issue tracker, labels, milestones, 
 - The 2026-11-14 documentation update created `AGENTS.md` and edited `AI_WORKFLOW.md`, `README.md`, and `PROGRESS.md`. No code, tests, configuration, environment variables, database, Docker state, Git history, or provider settings were changed; nothing was staged, committed, pushed, or deployed.
 - The 2026-11-15 documentation update recorded the observability implementation and CI verification at commit `33b3e05` across `PROGRESS.md`, `PROJECT_SPEC.md`, `README.md`, `backend/README.md`, and `frontend/README.md`. It changed only documentation; no code, tests, configuration, environment variables, database, Docker state, Git history, or provider settings were changed; nothing was staged, committed, pushed, or deployed by this update.
 - The 2026-11-15 alerting work added `backend/app/core/alerting.py`, `backend/app/core/alerting_runner.py`, their focused tests, `.github/workflows/alerting.yml`, and `docs/ALERTING_RUNBOOK.md` (Phase 2A–2C). The Phase 2D documentation pass changed only documentation (`PROGRESS.md`, `README.md`, `PROJECT_SPEC.md`, and the runbook). The workflow was not executed against production, and no environment, provider, database, or deployment setting was changed; nothing was staged, committed, pushed, or deployed.
+- The 2026-11-15 tracker update created the public [FinPath — Development Tracker](https://github.com/users/alicephoo/projects/1) and six draft items. It created no GitHub Issues, pull requests, labels, or milestones, and changed no repository files. Public visibility was verified with `gh project view` and an unauthenticated HTTP 200.

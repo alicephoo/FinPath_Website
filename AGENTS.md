@@ -34,6 +34,7 @@ The backend owns financial rules and persistence. The frontend renders API respo
 | Document | Role |
 |---|---|
 | [`PROJECT_SPEC.md`](PROJECT_SPEC.md) | **Authoritative** product specification: scope, financial rules, security, API behavior, deployment, and acceptance criteria |
+| [FinPath — Development Tracker](https://github.com/users/alicephoo/projects/1) | **Active task tracker** (public GitHub Projects v2 board): tasks, acceptance criteria, agent roles, and evidence |
 | [`API_CONTRACTS.md`](API_CONTRACTS.md) | Endpoint contracts, error envelopes, ETags, and idempotency |
 | [`BACKEND_ARCHITECTURE.md`](BACKEND_ARCHITECTURE.md) | Schema, privilege/protection matrix, and deferred design decisions |
 | [`README.md`](README.md) | Public overview, setup, architecture, and limitations |
@@ -117,6 +118,18 @@ FinPath uses six roles. Small tasks may be handled by one agent wearing several 
 
 ## 4. Collaboration workflow
 
+### 4.0 Task tracking
+
+The public [FinPath — Development Tracker](https://github.com/users/alicephoo/projects/1) is the active task tracker; `TASKS.md` is historical.
+
+1. The Coordinator checks the board before starting work and selects or confirms the matching draft task.
+2. Confirm the task's acceptance criteria, scope and non-goals, and responsible agent role.
+3. Move the task to `In Progress` before implementation begins.
+4. Record actual implementation and verification evidence on the task: changed files, commands and actual results, tests not run and why, security/privacy impact, documentation updated, and remaining questions.
+5. Move the task to `Done` only when its acceptance criteria are verified.
+
+Never fabricate task status, assignments, comments, or evidence. Routine status and evidence updates on the approved board are authorized. Creating a new project, deleting or archiving items, or creating GitHub Issues, labels, or milestones still requires separate approval.
+
 ### 4.1 Delegation packet
 
 The Coordinator issues a packet containing the task ID and goal, the relevant `PROJECT_SPEC.md` sections and acceptance criteria, in-scope areas and explicit non-goals, existing conventions and risks, required tests, any approval gate, and the expected handoff format. No agent starts from a bare instruction.
@@ -127,6 +140,7 @@ Before editing, re-read the relevant authority document and inspect current Git 
 
 ```text
 Task:
+Tracker item and status:
 Spec references:
 Changed files:
 Behavior or documentation change:
@@ -149,7 +163,7 @@ Remaining questions and next steps:
 1. The author runs the narrowest relevant tests and reports actual results.
 2. QA independently runs the required suites.
 3. The Security & Reliability Reviewer approves high-risk changes.
-4. The Coordinator confirms the evidence.
+4. The Coordinator confirms the tracker item and its evidence.
 5. The Documentation & Context Manager updates status and documentation last.
 
 ### 4.5 Conflict resolution
@@ -158,7 +172,7 @@ Apply the precedence in Section 2. If the specification is silent, record the op
 
 ### 4.6 Status and decisions
 
-`PROGRESS.md` holds current status and dated evidence. `TASKS.md` is historical and must not be presented as current. Handoff notes are transient per task; durable decisions are summarized after approval. Do not create parallel sources of truth.
+`PROGRESS.md` holds current status and dated durable evidence. The public Projects board holds live task status, acceptance criteria, and per-task evidence. `TASKS.md` is historical and must not be presented as current. Handoff notes are transient per task; durable decisions are summarized after approval. Do not create parallel sources of truth.
 
 ### 4.7 Human approval gates
 
@@ -170,7 +184,7 @@ Explicit human approval is required before:
 - Destructive actions such as deleting files, force-pushing, or resetting work.
 - Adding dependencies or changing CI permissions.
 - Changing `PROJECT_SPEC.md` scope or security requirements.
-- Creating GitHub Issues, labels, milestones, or projects.
+- Creating a new GitHub Project, deleting or archiving project items, or creating GitHub Issues, labels, or milestones. Routine status and evidence updates on the approved public tracker are authorized.
 
 ### 4.8 Workflow diagram
 
@@ -239,7 +253,8 @@ End every task with a completion report containing:
 5. Tests not run and the reason.
 6. Security and privacy impact.
 7. Documentation updated.
-8. Remaining questions and next steps.
+8. Tracker item and final status.
+9. Remaining questions and next steps.
 
 ## 8. Nested instructions
 
