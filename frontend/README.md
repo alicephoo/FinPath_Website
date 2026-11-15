@@ -2,6 +2,13 @@
 
 React + TypeScript + Vite frontend for FinPath.
 
+See [README.md](../README.md) for the full-stack overview, live deployment, and local setup, and [PROJECT_SPEC.md](../PROJECT_SPEC.md) for authoritative product behavior. This document covers frontend-specific implementation details.
+
+## Requirements
+
+- Node.js 18 or newer for the Vite app; Node.js 22 or newer for Wrangler/Cloudflare Pages tooling.
+- A running backend API for live data (see the root README).
+
 ## Development
 
 ```sh
@@ -20,6 +27,9 @@ Available scripts:
 | `npm run preview` | Preview the production build |
 | `npm run test` | Run Vitest in watch mode |
 | `npm run test:run` | Run all frontend tests once |
+| `npm run test:e2e` | Run Playwright end-to-end tests |
+| `npm run test:e2e:headed` | Run Playwright tests with a visible browser |
+| `npm run test:e2e:report` | Open the last Playwright report |
 
 ## Money and currency
 
@@ -37,22 +47,18 @@ Do not reinterpret older USD-cent sample values as Kyat.
   contributions and withdrawals, and trip spending.
 - Settings and planned amounts are not individual entries and may exceed that
   limit up to JavaScript's safe-integer bound. This includes the starting
-  balance, savings targets, daily-plan targets, and trip category budgets.
-  Starting balances may be zero or negative.
+  balance, savings targets, and trip category budgets. Starting balances may be
+  zero or negative.
 - Money totals, divisions, and allocations use exact integer arithmetic.
   Calculations that would exceed the safe-integer range throw instead of
   returning an unsafe value.
-- Daily savings plans with a blank daily amount allocate the target exactly
-  across the schedule, so rounding never loses or invents Kyat. An explicit
-  daily amount creates a fixed whole-Kyat amount per day.
-- The dashboard CSV export is disabled until the deferred reports/export API
-  exists. The sample report helper still formats whole-Kyat integers if it is
-  reused later.
+- The live Dashboard downloads CSV from `GET /api/v1/reports/export.csv`; CSV
+  amount cells use raw whole-Kyat integers such as `1234`.
 
-The Dashboard balance, transaction totals, recent transactions, loan totals, and
-savings progress are loaded from the backend. The Transactions, Loans,
-Savings Goals, and Travel Budget tabs are live and read and write records
-through the backend.
+The Dashboard balance, transaction totals, recent transactions, loan totals,
+savings progress, six-month cash flow, expense categories, and CSV export are
+loaded from the backend. The Transactions, Loans, Savings Goals, and Travel
+Budget tabs are live and read and write records through the backend.
 
 ## API configuration
 
@@ -77,9 +83,9 @@ Only `VITE_`-prefixed values are exposed to browser code. Never put passwords,
 tokens, database credentials, or other secrets in a frontend environment
 variable.
 
-### Container API proxy
+### Container and production API proxies
 
-The production Nginx image renders `nginx.conf` from environment values:
+The Docker frontend image uses Nginx and renders `nginx.conf` from environment values:
 
 - `PORT` — Nginx listen port, default `80`.
 - `BACKEND_UPSTREAM` — API upstream, default `http://backend:8000`.
@@ -93,12 +99,12 @@ proxied, and other routes use the SPA fallback.
 For Docker Compose, the Dockerfile defaults keep `PORT=80` and
 `BACKEND_UPSTREAM=http://backend:8000`. Compose continues to build the browser
 with the direct `http://localhost:8000/api/v1` API base, so existing local
-behavior is unchanged. For Railway, use the relative `/api/v1` build base and
-set, for example:
+behavior is unchanged.
 
-```text
-BACKEND_UPSTREAM=http://finpath-backend.railway.internal:8000
-```
+In production, Cloudflare Pages serves the static build and a Pages Function
+forwards `/api/*` to the fixed backend origin in `RENDER_BACKEND_URL`. The
+browser uses the relative `/api/v1` base, so no backend host is embedded in the
+bundle. See the root README for deployment settings.
 
 Do not add a trailing slash to `BACKEND_UPSTREAM`.
 
@@ -134,18 +140,47 @@ bodies are serialized as JSON. Successful JSON responses are returned in
 `data`; empty responses return `data: undefined`; successful non-JSON
 responses such as CSV are returned as text.
 
-## Dashboard and starting balance
+## Request correlation
 
-The Dashboard tab is connected to the backend through two services in
+Each API request carries an `X-Request-ID` header used only to correlate a
+browser request with backend logs. It is a diagnostic value, not
+authentication, authorization, or user identity, and it is not persisted to
+`localStorage` or `sessionStorage`.
+
+- The client generates an ID with `crypto.randomUUID()` when the caller does
+  not supply one. `Math.random()` is never used.
+- A caller-supplied `X-Request-ID` is reused only when it matches the backend
+  contract: 1–128 characters, the first character alphanumeric, and the
+  remainder limited to `A–Z`, `a–z`, `0–9`, `.`, `_`, `:`, or `-`. Missing
+  values are replaced by a generated ID, and malformed values are replaced when
+  `crypto.randomUUID` is available.
+- The response `X-Request-ID` is read and validated with the same pattern;
+  missing or malformed header values are treated as absent. The error-envelope
+  `request_id` fallback is surfaced without that pattern validation (finding
+  L2).
+- Successful responses expose the ID as `response.requestId`, and failures
+  expose it as `ApiError.requestId` for both HTTP errors and network errors
+  (`isNetworkError: true`). A network failure has no backend response, so it
+  reports the ID that was sent with the attempt.
+
+> **Known limitation (finding L1):** when `crypto.randomUUID` is unavailable, a
+> malformed caller-supplied `X-Request-ID` is not replaced and can be
+> forwarded. This is an open finding and is not fixed.
+
+## Dashboard, reports, and starting balance
+
+The Dashboard tab is connected to the backend through three services in
 `src/api`:
 
 - `financialSettings.ts` — `GET` and `PUT /users/me/financial-settings`.
 - `dashboard.ts` — `GET /dashboard/overview?recent_limit=5`.
+- `reports.ts` — `GET /reports/cash-flow`, `GET /reports/expenses-by-category`,
+  and `GET /reports/export.csv`.
 
-`DashboardReports.tsx` loads both endpoints in parallel through the
-authentication context's `authorizedRequest`. The response shapes match the
-backend account-balance, dashboard-overview, transaction, and savings-goal
-resources; no dashboard figures are recalculated from mock data.
+`DashboardReports.tsx` loads the overview, settings, and both report endpoints
+through the authentication context's `authorizedRequest`. The response shapes
+match the backend account-balance, dashboard-overview, transaction, savings-goal,
+and report resources; no dashboard figures are recalculated from mock data.
 
 ### Starting balance
 
@@ -187,19 +222,26 @@ A `not_configured` balance is displayed as **Not configured**, never as
 `0 MMK`. The dashboard shows the backend's calculated balance and does not
 subtract transactions itself.
 
-### Unsupported report panels
+### Reports and CSV export
 
-The overview endpoint does not return six-month cash flow, spending by category,
-per-trip travel rows, per-loan details, or CSV export data. Those panels are
-disabled with a clear explanation instead of showing sample figures. The
-overview does include aggregate recognized travel expense in Total expenses.
-The sample-data dashboard report builder in `src/data/dashboardReports.ts`
-remains unused by the live Dashboard tab.
+- The six-month cash-flow and expense-category reports are loaded from their
+  owner-scoped endpoints for the current six-month period. Empty months and empty
+  category periods render explicit empty states rather than sample figures.
+- **Export dashboard CSV** downloads `GET /reports/export.csv` as a UTF-8 file
+  named from the response `Content-Disposition`. The backend applies owner
+  scoping and formula-injection protection and includes summary, cash-flow,
+  category, transaction, loan, savings, and travel sections.
+- The overview response still does not embed per-trip travel rows or per-loan
+  details; those records remain in the Travel Budget and Loans tabs. Aggregate
+  recognized travel expense is included in Dashboard Total expenses.
+- `src/data/dashboardReports.ts` contains legacy sample helpers; the live
+  Dashboard tab uses the backend report endpoints instead.
 
-Loading, refresh, empty recent transactions, API/network error, authentication
-failure, failed save, and stale-revision states are handled in the component.
-The dashboard keeps tokens and financial data in React memory only; none of it
-is written to `localStorage` or `sessionStorage`.
+Loading, refresh, report failure and retry, empty reports, export failure, empty
+recent transactions, API/network error, authentication failure, failed save, and
+stale-revision states are handled in the component. The dashboard keeps tokens
+and financial data in React memory only; none of it is written to
+`localStorage` or `sessionStorage`.
 
 ## Transactions
 
@@ -340,12 +382,14 @@ The Savings Goals tab is connected to the backend through `src/api/savings.ts`:
 - `POST /savings/goals` — create a savings goal.
 - `GET /savings/goals/{goal_id}` — read one goal and its current `ETag`.
 - `PATCH /savings/goals/{goal_id}` — partially update a goal with `If-Match`.
-- `GET /savings/goals/{goal_id}/entries` — list contribution history.
+- `GET /savings/goals/{goal_id}/entries` — list append-only entry history.
 - `POST /savings/goals/{goal_id}/entries/contributions` — record a contribution.
+- `POST /savings/goals/{goal_id}/entries/withdrawals` — record a withdrawal.
 
-The list requests `status=active`; archived goals are not shown in this Phase 1
-interface. Actual balance, target, remaining amount, and per-goal progress come
-from backend fields and are never recalculated from the old sample data.
+The live list requests `status=active`; the backend also supports `archived` and
+`all`, but this interface does not expose archive/restore controls. Actual
+balance, target, remaining amount, and per-goal progress come from backend
+fields and are never recalculated from the old sample data.
 
 ### Goal list and details
 
@@ -377,28 +421,38 @@ from backend fields and are never recalculated from the old sample data.
   after an uncertain network failure reuses the key; changing the payload
   creates a new key. Duplicate submissions are guarded while a save is running.
 
-### Contributions
+### Contributions and withdrawals
 
 - A contribution sends a positive whole-Kyat `amount_kyat`, an `entry_date`,
   and an optional `note`. Amounts above **1,000,000,000 MMK** are rejected
   before a request is sent; the backend remains authoritative for the configured
   entry limit.
-- Each new contribution gets a fresh `Idempotency-Key`. The same key is reused
-  only when retrying the same unchanged operation; another payload gets a new
-  key. Duplicate submissions are guarded while the request is in flight.
-- Contributions are available only for active goals. Backend errors such as
-  `409 goal_archived` and validation messages are displayed in the open form.
-- The contribution endpoint does not return an ETag, so the page re-reads the
-  goal collection after success rather than assuming a new revision.
+- A withdrawal sends the same fields. The UI rejects an amount above the goal's
+  `actual_balance_kyat` before sending, and the backend also rejects overdraw
+  with `409 withdrawal_exceeds_balance`.
+- Each new contribution or withdrawal gets a fresh `Idempotency-Key`. The same
+  key is reused only when retrying the same unchanged operation; another payload
+  gets a new key. Duplicate submissions are guarded while the request is in
+  flight.
+- Contributions and withdrawals are available only for active goals. Backend
+  errors such as `409 goal_archived` and validation messages are displayed in the
+  open form.
+- The contribution and withdrawal endpoints do not return an ETag, so the page
+  re-reads the goal collection and the open history after success rather than
+  assuming a new revision. Withdrawals reduce actual savings and return cash to
+  the available balance; the Dashboard recalculates when it next loads or becomes
+  active.
 
 ### Deferred savings operations
 
-The backend has no savings-withdrawal, correction, archive/restore, or daily-plan
-endpoints. Those controls were removed from the active workflow, and the page
-states that they are unavailable in this Phase 1 integration. The page does not
-simulate any of them in frontend state. `src/data/savingsGoalsMockData.ts`
-remains only for legacy sample dashboard helpers and their tests; the live
-Savings Goals tab does not use it.
+The backend supports archive and restore, but this frontend does not call those
+endpoints and shows no archive/restore controls. The page's notice groups
+archive/restore with corrections and daily savings plans, which are unavailable
+here. Savings corrections, daily plans, plan-day transitions, and scheduled-day
+association are not implemented in the backend. The page does not simulate any of
+these operations in frontend state. `src/data/savingsGoalsMockData.ts` remains
+only for legacy sample dashboard helpers and their tests; the live Savings Goals
+tab does not use it.
 
 The backend has no savings-goal deletion endpoint, so the page has no delete
 action.
@@ -650,17 +704,36 @@ npm run test:run
 npm run build
 ```
 
-The API client, transaction, loan, savings, financial-settings, and dashboard
-API tests mock `fetch`. The transaction, loan, savings, travel, and dashboard
-component tests mock the authenticated-request helper and API services, so none
-of them requires a running backend.
+The API client, transaction, loan, savings, financial-settings, reports, and
+dashboard API tests mock `fetch`. The transaction, loan, savings, travel, and
+dashboard component tests mock the authenticated-request helper and API
+services, so none of them requires a running backend. The tests cover money
+parsing and formatting, date handling, the shared client and retry policy,
+authentication, report loading and CSV download, and the dashboard, savings,
+loans, transactions, and travel flows, including withdrawals.
 
-Current baseline: 17 test files and 221 passing tests; the production
-`tsc -b && vite build` succeeds. Task 5.7 also passed live checks against the
-local FastAPI backend for goal creation/replay, list/detail, stale and missing
-preconditions, valid updates, contribution creation/replay, history, and
-over-limit validation. Task 5.8 travel tests cover persistence, totals,
-over-budget support, entry limits, ownership isolation, and invalid imports.
-Task 5.9 tests cover allocation-aware Dashboard totals, no double counting,
-excess-only over-budget recognition, unused-budget return on completion,
-idempotent completion, cancellation preserving spending, and import accounting.
+Verified CI snapshot from run
+[`43174534132`](https://github.com/alicephoo/FinPath_Website/actions/runs/43174534132)
+on 2026-11-12: 316 tests passed across 19 files, and `tsc -b && vite build`
+succeeded. The API-client tests cover whole-Kyat parsing and rejection of
+decimals, separators, and currency symbols; the dashboard tests cover cash-flow
+and category reports, CSV download and failure, stale revisions, and refreshed
+figures; the savings tests cover contributions, withdrawals, ownership, and
+archive errors.
+
+### End-to-end tests
+
+Playwright drives the built application in Chromium through the specs in
+`e2e/` (`auth`, `regression`, `reports-csv`, `savings-withdrawals`, and
+`user-isolation`). Install the browser once, then run the suite:
+
+```sh
+npx playwright install chromium
+npm run test:e2e
+```
+
+Use `npm run test:e2e:headed` to watch the browser and
+`npm run test:e2e:report` to open the last report. The same CI run recorded 10
+Playwright tests across 5 specs. See the root
+[README.md](../README.md#running-tests) for the `FINPATH_TEST_*` backends and the
+full-stack test setup.

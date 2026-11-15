@@ -1,39 +1,45 @@
 # FinPath Backend
 
-The backend has typed environment settings, separate PostgreSQL runtime,
-registration, and migration connection configuration, SQLAlchemy engine and
-session infrastructure, a health check, 20 registered SQLAlchemy models, and
-the initial plus Task 4.1 authentication migrations. PostgreSQL 17.11 is
-installed locally. The initial revision `7270e464aca9` and authentication
-revisions `c7a4e2f19b30`, `e1b9c0d4a7f2`, and `f4a1c2d3e5b6`, the registration
-grant revision `b9e4d2a7c1f3`, and the trip-status revision `c4f7a1b9e2d6` are
-applied and verified on the dedicated `finpath_test` database and on the
-development `finpath` database. Task 4.0 initialized the development database with the
-approved schema and seeded reference data (2 roles and 11 categories). Task 4.1
-implements the authentication foundation. Task 4.2 implements the authenticated
-Transactions API and read-only transaction-category endpoint. Task 4.3
-implements the authenticated Loans API, including repayments and append-only
-repayment corrections. Task 4.4 implements the authenticated Savings goals and
-contributions API, including derived actual and remaining balances. Task 4.5
-implements the authenticated Dashboard overview API, reusing the transaction,
-loan, and savings calculations in one repeatable-read snapshot. Task 4.6
-implements the authenticated starting-balance financial-settings API. Task 4.7
-implements the authenticated Travel Budget API under `/api/v1/trips`, including
-owner-scoped trips, planned expenses, actual spending, atomic JSON import, and
-explicit trip completion/cancellation with allocation-aware accounting.
-Savings withdrawals, corrections, daily plans, the remaining dashboard reports,
-and CSV export remain unimplemented. Tasks 3.0a Backend Architecture and
-3.0b API Contracts are APPROVED AND COMPLETE. Task 3.6a.2 account-lifecycle and
-financial-immutability design is APPROVED AND COMPLETE, the Task 3.8b
-protection matrix is approved, and Tasks 3.8c, 3.8d, 3.8e, 4.0, 4.1, 4.2, 4.3,
-4.4, 4.5, and 4.6 are complete except the explicitly deferred runtime `user_roles` write
-path for Admin management. The User status check supports exactly `active`, `suspended`,
+See [README.md](../README.md) for the full-stack overview, deployment, and local setup, and [PROJECT_SPEC.md](../PROJECT_SPEC.md) for authoritative product behavior. This document covers backend-specific implementation details.
+
+The backend is a FastAPI service with typed environment settings, separate
+PostgreSQL runtime, registration, and migration connection configuration,
+SQLAlchemy engine and session infrastructure, `/health` and `/ready` probes, and
+20 registered SQLAlchemy models. The initial revision `7270e464aca9`,
+authentication revisions `c7a4e2f19b30`, `e1b9c0d4a7f2`, and `f4a1c2d3e5b6`, the
+registration grant revision `b9e4d2a7c1f3`, and the trip-status revision
+`c4f7a1b9e2d6` are applied and verified on the dedicated `finpath_test`
+database and the development `finpath` database. Migrations are explicit and
+are never run by application startup.
+
+The implemented APIs are authenticated and owner-scoped:
+
+- Transactions under `/api/v1/transactions`, plus the read-only
+  `/api/v1/transaction-categories`.
+- Loans under `/api/v1/loans`, including repayments and append-only repayment
+  corrections.
+- Savings goals under `/api/v1/savings/goals`, including contributions,
+  withdrawals, and archive/restore.
+- The Dashboard overview under `/api/v1/dashboard`.
+- Starting-balance financial settings under `/api/v1/users/me/financial-settings`.
+- The Travel Budget API under `/api/v1/trips`, including planned expenses,
+  actual spending, atomic JSON import, and completion/cancellation with
+  allocation-aware accounting.
+- The dashboard reports and CSV export under `/api/v1/reports`.
+
+Tasks 3.0a Backend Architecture and 3.0b API Contracts are APPROVED AND
+COMPLETE. The Task 3.6a.2 account-lifecycle and financial-immutability design is
+APPROVED AND COMPLETE, and the Task 3.8b protection matrix is approved. The only
+explicitly deferred runtime authorization gap is the `user_roles` write path for
+Admin management. The User status check supports exactly `active`, `suspended`,
 and `closed`.
 
 ## Requirements
 
 - Python 3.11 or 3.12
 - pip (included with Python)
+- PostgreSQL 17 (the migrations, triggers, and tests target PostgreSQL 17;
+  17.11 is used locally)
 
 The project uses a local virtual environment and pip with `pyproject.toml` as
 the dependency manifest. It does not require a globally installed tool.
@@ -68,8 +74,10 @@ With the virtual environment activated, from `backend/`:
 uvicorn app.main:app --reload
 ```
 
-The API is available at `http://127.0.0.1:8000`. The health endpoint is
+The API is available at `http://127.0.0.1:8000`. The liveness endpoint is
 `GET /health` and returns `{"status":"ok"}` without connecting to PostgreSQL.
+The readiness endpoint is `GET /ready`: it returns `{"status":"ready"}` when a
+database connection succeeds and `503 {"status":"unavailable"}` otherwise.
 Interactive OpenAPI documentation is available at `/docs`.
 
 The container entry point binds to `0.0.0.0` and uses `PORT` when supplied,
@@ -103,6 +111,107 @@ exposing connection details.
 
 No PostgreSQL server is required to import the application or run its health
 tests. The engine does not connect until a database operation is requested.
+
+## Observability
+
+The backend emits structured JSON request logs, bounded domain events, and
+in-process Prometheus metrics. This is request correlation and metrics only;
+there is no distributed tracing.
+
+### Configuration
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `FINPATH_LOG_LEVEL` | `INFO` | Level for the `app` logger tree. |
+| `FINPATH_SLOW_REQUEST_THRESHOLD_MS` | `1000` | Duration at or above which a request is logged as slow and counted by `finpath_http_slow_requests_total`. |
+| `FINPATH_METRICS_ENABLED` | `false` | Enables the `GET /metrics` endpoint. |
+| `FINPATH_METRICS_TOKEN` | unset (`None`) | Bearer token required by `/metrics` when metrics are enabled; never authorizes when unset or empty. |
+
+Metrics are disabled by default, and no production metrics configuration is
+enabled. Enabling metrics without a token does not fail startup; the endpoint
+simply refuses access.
+
+### Request correlation
+
+Each request resolves an `X-Request-ID` (1–128 characters, first character
+alphanumeric, remainder limited to `A–Z`, `a–z`, `0–9`, `.`, `_`, `:`, `-`),
+generating a UUID when the header is missing or malformed. The ID is stored in a
+request context, echoed in the `X-Request-ID` response header, exposed through
+CORS, and attached to every log record for that request. Each completed request
+emits one JSON record with `timestamp`, `severity`, `logger`, `event`,
+`message`, `request_id`, and bounded fields such as `method`, `route`,
+`status_code`, `duration_ms`, `slow`, and `error_type`. Request/response bodies,
+cookies, authorization headers, query strings, and database details are never
+logged.
+
+### Domain events
+
+Domain events use an allowlisted vocabulary and fixed authentication-failure
+reasons. Examples include `auth_login_succeeded`, `auth_login_failed`,
+`transaction_created`, `loan_repayment_recorded`, `savings_goal_archived`,
+`travel_spending_recorded`, and `report_exported`. `auth_login_failed` requires
+one of `invalid_credentials`, `email_verification_required`,
+`account_suspended`, or `account_closed`; other events reject a reason. Messages
+are static and no user data is interpolated. Write-path events are emitted after
+a successful commit, and idempotent replays and archive/restore no-ops are
+suppressed. The request ID is attached by the logging context filter.
+
+### Metrics
+
+A fresh metrics registry is created per application instance after all routes
+are registered. Three metrics are exposed in the Prometheus text format
+(`text/plain; version=0.0.4; charset=utf-8`):
+
+| Metric | Type | Labels |
+|---|---|---|
+| `finpath_http_requests_total` | Counter | `route`, `method`, `status` |
+| `finpath_http_request_duration_seconds` | Histogram | `route`, `method` |
+| `finpath_http_slow_requests_total` | Counter | `route`, `method` |
+
+The histogram uses default buckets in seconds: `0.005, 0.01, 0.025, 0.05, 0.1,
+0.25, 0.5, 1.0, 2.5, 5.0, 10.0`. Labels are bounded: `route` is the set of
+registered route templates plus `unmatched` and `other`, `method` is a fixed
+method set plus `other`, and `status` is a fixed set of expected status codes
+plus `other`. Raw paths, path parameters, query strings, user identifiers, and
+financial values never become labels. Each eligible request is recorded once
+with its final status and duration; recording failures are swallowed and logged
+as a static warning so metrics cannot change a response. The `/metrics` scrape
+route is excluded from instrumentation.
+
+Metrics are in-process only: counters reset on process restart and are not
+shared across backend instances.
+
+### `/metrics` endpoint
+
+`GET /metrics` is excluded from the OpenAPI schema.
+
+- **Disabled (default):** returns an empty `404`.
+- **Enabled:** requires a single well-formed `Authorization: Bearer <token>`
+  credential. A correct token returns the Prometheus exposition. Missing,
+  malformed, duplicate, incorrect, or unconfigured credentials return an
+  indistinguishable generic `401` with `WWW-Authenticate: Bearer`.
+- The token is compared with `hmac.compare_digest` over UTF-8 bytes and is never
+  authorized when unset or empty. The configured token is a masked `SecretStr`
+  and is never logged or returned.
+- The endpoint does not require browser CSRF or trusted-origin checks, and it
+  never instruments its own scrape requests.
+
+### Observability tests
+
+```sh
+pytest tests/test_observability.py
+pytest tests/test_metrics.py
+pytest tests/test_http_metrics.py
+pytest tests/test_domain_events_postgres.py
+```
+
+`test_observability.py` covers request-ID resolution, structured logging, the
+domain-event allowlist, and redaction. `test_metrics.py` covers registry
+validation, counter/gauge/histogram semantics, rendering, and concurrency.
+`test_http_metrics.py` covers HTTP instrumentation and the protected `/metrics`
+endpoint. `test_domain_events_postgres.py` covers post-commit emission, replay
+and no-op suppression, and failed-write absence against PostgreSQL; it skips
+when the test database is not configured (finding M1).
 
 ## Authentication
 
@@ -200,8 +309,11 @@ verification and password-reset messages to an owner-only directory
 (`FINPATH_EMAIL_OUTBOX_DIR`, default `var/email_outbox`) instead of delivering
 them. The outbox is for local testing only and is not a delivery guarantee; the
 account remains unverified if a message cannot be sent, and the user can request
-another message. The current no-email production MVP disables verification and
-does not use the outbox or require Resend.
+another message. The no-email production configuration requires
+`FINPATH_REQUIRE_EMAIL_VERIFICATION=false` together with the explicit
+`FINPATH_ALLOW_UNVERIFIED_REGISTRATION=true` opt-in; it does not use the
+outbox and does not require Resend. Because the feature is gated rather than
+defaulted, production otherwise stays fail-closed.
 
 Production uses the Resend HTTPS API (`https://api.resend.com/emails`) through
 the existing `EmailSender` interface. Configure:
@@ -272,8 +384,9 @@ settings exist, allows negative results, applies savings and travel allocation
 layers, and raises `500 aggregate_out_of_range` rather than serializing an
 unsafe JSON integer. Starting-balance management is not part of Task 4.2.
 
-The frontend is integrated with these whole-MMK-Kyat endpoints for the Dashboard,
-Transactions, Loans, Savings Goals, and Travel Budget tabs.
+The frontend is integrated with these whole-MMK-Kyat endpoints for the
+Transactions, Loans, Savings Goals, and Travel Budget tabs, and the Dashboard
+uses the balance calculation together with the dashboard and report endpoints.
 
 ## Loans API
 
@@ -321,12 +434,14 @@ total.
 
 ## Savings API
 
-Task 4.4 implements owner-scoped savings goals and contributions under
-`/api/v1/savings/goals`. Every route uses the Task 4.1 authenticated-user
-dependency and the `finpath_app` runtime identity. Goal creation and
-contribution creation require `Idempotency-Key`; goal updates require the
-current `If-Match` and return a quoted strong `ETag` derived from the goal
-revision.
+Owner-scoped savings goals, contributions, withdrawals, and archive/restore are
+implemented under `/api/v1/savings/goals`. Every route uses the Task 4.1
+authenticated-user dependency and the `finpath_app` runtime identity. Goal,
+contribution, withdrawal, archive, and restore writes require
+`Idempotency-Key`; goal updates and archive/restore also require the current
+`If-Match`. Goal create, read, update, archive, and restore return a quoted
+strong `ETag` derived from the goal revision; contribution and withdrawal
+writes do not return an `ETag`.
 
 | Method and path | Purpose |
 |---|---|
@@ -334,32 +449,43 @@ revision.
 | `POST /savings/goals` | Create a goal with `name`, `target_kyat`, and optional `tone`. Requires `Idempotency-Key`; returns `201` with the resource and `ETag`. |
 | `GET /savings/goals/{goal_id}` | Read one caller-owned goal with its derived actual and remaining amounts; return its `ETag`. |
 | `PATCH /savings/goals/{goal_id}` | Update `name`, `target_kyat`, or `tone` on an active goal. Requires the current `If-Match`; returns the updated resource and `ETag`. |
+| `POST /savings/goals/{goal_id}/archive` | Archive a goal. Requires `If-Match`, `Idempotency-Key`, and `{"confirm": true}`; returns the archived resource and `ETag`. |
+| `POST /savings/goals/{goal_id}/restore` | Restore an archived goal. Requires `If-Match`, `Idempotency-Key`, and `{"confirm": true}`; returns the active resource and `ETag`. |
 | `GET /savings/goals/{goal_id}/entries` | List append-only entries for a caller-owned goal, newest first. |
 | `POST /savings/goals/{goal_id}/entries/contributions` | Append a contribution to an active goal with `amount_kyat`, `entry_date`, and optional `note`. Requires `Idempotency-Key`; increments the goal revision and returns `201` with the entry. |
+| `POST /savings/goals/{goal_id}/entries/withdrawals` | Append a withdrawal to an active goal with `amount_kyat`, `entry_date`, and optional `note`. Requires `Idempotency-Key`; increments the goal revision and returns `201` with the entry. |
 
 Goal names are required and trimmed to 80 characters; optional presentation
 tones are trimmed to 16 characters and an empty tone is stored as null.
-Contribution notes are optional and limited to 100 characters. Savings targets
-must be positive whole-Kyat JSON integers within the safe integer range but are
-settings rather than individual financial entries, so the configurable
-`FINPATH_MAX_FINANCIAL_ENTRY_KYAT` limit does not apply to them. Contributions
-must be positive whole-Kyat JSON integers within that entry limit. Dates are
-strict local-calendar `YYYY-MM-DD` values. Client-supplied ownership fields and
-unknown fields are rejected, and another user's goal or contribution target
-returns `404 not_found`.
+Contribution and withdrawal notes are optional and limited to 100 characters.
+Savings targets must be positive whole-Kyat JSON integers within the safe
+integer range but are settings rather than individual financial entries, so the
+configurable `FINPATH_MAX_FINANCIAL_ENTRY_KYAT` limit does not apply to them.
+Contributions and withdrawals must be positive whole-Kyat JSON integers within
+that entry limit. Dates are strict local-calendar `YYYY-MM-DD` values.
+Client-supplied ownership fields and unknown fields are rejected, and another
+user's goal or entry target returns `404 not_found`.
 
 Actual savings is derived from append-only entries as the checked sum of
-contributions less withdrawals, so future compensating correction entries are
-included automatically. `remaining_kyat` is `max(0, target_kyat -
-actual_balance_kyat)`. Contributions may exceed the target because the
-approved contract does not cap savings entries at the goal target; an
-overfunded goal reports zero remaining. Contribution insertion locks the parent
-goal, verifies that it is active, appends the immutable entry, and increments
-the goal revision atomically. Archived goals reject new contributions and
-metadata updates with `409 goal_archived`. Savings contributions are not
-transaction expenses and do not affect account balance. Withdrawals,
-corrections, archive/restore, daily plans, plan-day transitions, and
-scheduled-day association remain unimplemented.
+contributions less withdrawals. `remaining_kyat` is `max(0, target_kyat -
+actual_balance_kyat)`. Contributions may exceed the target because the approved
+contract does not cap savings entries at the goal target; an overfunded goal
+reports zero remaining. Contribution and withdrawal insertion lock the parent
+goal, verify that it is active, append the immutable entry, and increment the
+goal revision atomically. A withdrawal above the current actual balance is
+rejected with `409 withdrawal_exceeds_balance`; concurrent withdrawals cannot
+overdraw because the goal row is locked. Archived goals reject new
+contributions, withdrawals, and metadata updates with `409 goal_archived`.
+
+Savings contributions and withdrawals are not transaction expenses. They affect
+the available balance only through the recognized savings allocation: an active
+goal reserves `max(target_kyat, contributions) - withdrawals`, while an
+archived goal reserves its actual balance. Archive/restore require
+`If-Match`, `Idempotency-Key`, and an explicit `{"confirm": true}`; a missing
+confirmation returns `422 confirmation_required`. Repeating the same
+archive/restore action with a new key is a no-op rather than another revision
+bump. Savings corrections, daily plans, plan-day transitions, and scheduled-day
+association remain unimplemented.
 
 ## Dashboard API
 
@@ -397,11 +523,36 @@ starting balance or effective date preserves `not_configured` instead of
 assuming zero, and unsafe aggregate
 results return `500 aggregate_out_of_range` rather than truncating. The whole
 response is read in one repeatable-read transaction so it cannot mix pre- and
-post-mutation totals. Six-month cash flow, expense categories, per-trip rows in
-the overview response, the separate report endpoints, and CSV export remain
-unimplemented. Trip records are available through the separate `/api/v1/trips`
-API. The `b9e4d2a7c1f3` and `c4f7a1b9e2d6` revisions add grants and trip status;
-no new accounting table was required.
+post-mutation totals. The overview response does not embed per-trip travel rows
+or per-loan details; those records remain available through the separate
+`/api/v1/trips` and `/api/v1/loans` APIs. Cash-flow, expense-category, and CSV
+reporting are provided by the separate Reports API below. The `b9e4d2a7c1f3` and
+`c4f7a1b9e2d6` revisions add grants and trip status; no new accounting table was
+required.
+
+## Reports API
+
+Owner-scoped dashboard reports and CSV export are implemented under
+`/api/v1/reports` through the Task 4.1 authenticated-user dependency and the
+`finpath_app` runtime identity. Every query is scoped to the authenticated
+owner and runs in a repeatable-read snapshot so a response cannot mix pre- and
+post-mutation rows.
+
+| Method and path | Purpose |
+|---|---|
+| `GET /reports/cash-flow` | Monthly income and expense totals for the requested period, including zero-activity months. |
+| `GET /reports/expenses-by-category` | Expense totals grouped by category name for the requested period. |
+| `GET /reports/export.csv` | Download a UTF-8 CSV report assembled from the current overview, reports, transactions, loans, savings, and travel records. |
+
+`from` and `to` are inclusive `YYYY-MM-DD` bounds. Omitting both returns the
+current month plus the previous five months; supplying only one bound returns
+`422 invalid_date_range`. Amounts are checked whole-Kyat JSON integers.
+`/reports/export.csv` returns `text/csv` with a
+`Content-Disposition: attachment; filename="finpath-dashboard-report.csv"` and
+`Cache-Control: no-store`. The CSV includes summary, cash-flow, category,
+transaction, loan, savings, and travel sections. Untrusted text cells are
+escaped and protected against spreadsheet formula injection, while numeric
+cells remain separate unquoted integers so the file is not corrupted.
 
 ## Financial Settings API
 
@@ -457,10 +608,10 @@ never read or write another user's plans or spending.
 | `PATCH /trips/{trip_id}` | Update trip details; requires `If-Match`. |
 | `POST /trips/{trip_id}/complete` | Mark an active trip completed; requires `If-Match` and `Idempotency-Key`. Unused allocation is released and actual spending remains recognized. |
 | `DELETE /trips/{trip_id}` | Cancel the trip; requires `If-Match`, `Idempotency-Key`, and `{"confirm": true}`. The trip is hidden from the active list, unused allocation is released, and budgets/spending are preserved. |
-| `GET|POST /trips/{trip_id}/budgets` | List or create planned expenses (category budgets). |
-| `GET|PATCH|DELETE /trips/{trip_id}/budgets/{budget_id}` | Read, update, or remove one planned expense; updates/deletes require `If-Match`. |
-| `GET|POST /trips/{trip_id}/spending` | List or create actual spending. |
-| `GET|PATCH|DELETE /trips/{trip_id}/spending/{spending_id}` | Read, update, or delete one spending entry; updates/deletes require `If-Match`. |
+| `GET\|POST /trips/{trip_id}/budgets` | List or create planned expenses (category budgets). |
+| `GET\|PATCH\|DELETE /trips/{trip_id}/budgets/{budget_id}` | Read, update, or remove one planned expense; updates/deletes require `If-Match`. |
+| `GET\|POST /trips/{trip_id}/spending` | List or create actual spending. |
+| `GET\|PATCH\|DELETE /trips/{trip_id}/spending/{spending_id}` | Read, update, or delete one spending entry; updates/deletes require `If-Match`. |
 | `POST /trips/import` | Validate and atomically import a JSON `trips` document; requires `Idempotency-Key`. |
 
 Trip totals are derived from the stored child rows: `budget_kyat` is the sum of
@@ -556,7 +707,7 @@ Prerequisites:
 - Preflight confirms `finpath` has no application tables and no
   `alembic_version` table.
 
-The approved result is the current Alembic head (`f4a1c2d3e5b6`), 20
+The approved result is the current Alembic head (`c4f7a1b9e2d6`), 20
 application tables plus `alembic_version`, 2 roles, and 11 categories. Running
 the seed again inserts zero rows. `finpath_test` is not modified by development
 initialization.
@@ -633,23 +784,24 @@ deletion, whole-Kyat entry validation, category/type checks, and the
 transaction-derived balance service. Task 4.3 implements the Loans API,
 repayment recording, derived outstanding principal, repayment ETags, and
 append-only full-reversal corrections under a loan lock. Task 4.4 implements
-the Savings goals and contributions API, derived actual/remaining balances,
-goal ETags, and goal-row locking. Task 4.5 implements the Dashboard overview
-API, reusing the transaction balance/totals, loan outstanding, and savings
-balance calculations in one repeatable-read snapshot. Task 4.6 implements the
-starting-balance financial-settings API with owner scoping, ETag-protected
-replacement, paired null clearing, and safe whole-Kyat validation. Shared
-external rate limiting, savings withdrawals/corrections/daily plans, travel,
-the remaining dashboard reports/CSV export, and Admin role management remain
+the Savings goals, contributions, and withdrawals API plus archive/restore,
+derived actual/remaining balances, goal ETags, and goal-row locking. Task 4.5
+implements the Dashboard overview API, reusing the transaction balance/totals,
+loan outstanding, and savings balance calculations in one repeatable-read
+snapshot. Task 4.6 implements the starting-balance financial-settings API with
+owner scoping, ETag-protected replacement, paired null clearing, and safe
+whole-Kyat validation. Task 4.7 implements the Travel Budget API. The Reports
+API implements six-month cash flow, expense categories, and CSV export.
+Shared external rate limiting, savings corrections/daily plans, Admin role
+management, MFA/passkeys/social login, and other deferred security work remain
 unimplemented.
 Unverified users cannot access normal application APIs, financial features, or
 dashboard data; verification tokens expire after 24 hours. Exact aggregates that exceed
-safe JSON integer representation return `500 aggregate_out_of_range`. Timezone
-changes preserve all existing scheduled savings-plan dates; the new timezone
-applies to plans created afterward. Completing a later day while an earlier
-day is overdue and pending returns `409 earlier_plan_day_pending`, with the
-blocking date when appropriate. Other deferred items include password
-complexity beyond the minimum, personal-data retention,
+safe JSON integer representation return `500 aggregate_out_of_range`. The
+authenticated identity includes a timezone that defaults to `Asia/Yangon`;
+daily savings plans and their scheduled-day semantics are not implemented, so
+no plan-day transition errors are produced. Other deferred items include
+password complexity beyond the minimum, personal-data retention,
 Redis operations, idempotency cleanup scheduling, account-closure handling
 for active financial plans, and deployment details for append-only database
 permissions/triggers (the policy scope is approved). Account states are
@@ -660,17 +812,18 @@ administrator workflows. Financial/audit history is retained; no user or
 financial-history hard-delete flow is provided.
 
 Financial immutability is scoped: loan repayment facts and their correction
-records are append-only, savings entries use append-only correction entries,
-terminal daily-plan snapshots are immutable, and audit records are append-only.
-Idempotency records remain mutable for processing, completion, and expiry
-cleanup. Other resources retain only the edits/deletions allowed by their API
-contract. Tasks 3.8c/3.8d added trigger/function definitions, required
-checks, per-table/column privileges, and a restricted cleanup function to the
-initial revision; Task 3.8e applied and verified it on `finpath_test`, and
-Task 4.0 applied and verified it on the development `finpath` database.
-Isolated PostgreSQL 17 tests exercise the definitions using the actual
-`finpath_app` role. Service authorization, owner scoping, ETags, and locking
-remain implementation work.
+records are append-only, savings entries are append-only, terminal daily-plan
+snapshots are immutable at the schema level, and audit records are append-only.
+Savings corrections and daily-plan APIs are not implemented. Idempotency
+records remain mutable for processing, completion, and expiry cleanup. Other
+resources retain only the edits/deletions allowed by their API contract. Tasks
+3.8c/3.8d added trigger/function definitions, required checks, per-table/column
+privileges, and a restricted cleanup function to the initial revision; Task
+3.8e applied and verified it on `finpath_test`, and Task 4.0 applied and
+verified it on the development `finpath` database. Isolated PostgreSQL 17 tests
+exercise the definitions using the actual `finpath_app` role. Service
+authorization, owner scoping, ETags, and locking are implemented in the
+services and covered by the PostgreSQL test suite.
 
 ## Financial data protection status
 
@@ -727,10 +880,31 @@ pytest tests/test_auth_postgres.py
 pytest tests/test_security.py tests/test_migrations.py tests/test_pg_test_env.py
 ```
 
+Savings, report, and travel coverage lives in
+`tests/test_savings_postgres.py`, `tests/test_reports_postgres.py`, and
+`tests/test_travel_postgres.py`. Focused runs:
+
+```sh
+pytest tests/test_savings_postgres.py
+pytest tests/test_reports_postgres.py
+pytest tests/test_travel_postgres.py
+```
+
+The savings tests cover contributions, withdrawals (including
+`409 withdrawal_exceeds_balance`), archive/restore with `If-Match`,
+`Idempotency-Key`, and confirmation, ownership isolation, and stale revisions.
+The report tests cover authentication, inclusive ranges and empty months,
+owner-scoped expense categories, and CSV escaping/formula protection.
 Database-security tests assert SQLSTATE `42501` for forbidden registration
 writes (including Admin role assignment and password-reset/email-change token
 minting), and `23503` for a permitted email-verification token with an unknown
 user. Do not weaken or skip these tests to make the suite pass.
+
+Verified CI snapshot from run
+[`43174534132`](https://github.com/alicephoo/FinPath_Website/actions/runs/43174534132)
+on 2026-11-12: 250 backend tests passed in 55.46 s against PostgreSQL 17. See
+the root [README.md](../README.md#running-tests) for full-stack test setup and
+`PROJECT_SPEC.md` for the completed evidence record.
 
 ### PostgreSQL test database
 
