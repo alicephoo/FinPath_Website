@@ -1,9 +1,10 @@
 # FinPath Alerting Runbook
 
-> **Status: implemented in the repository, not yet active.** Scheduled
-> production alerting begins only after `.github/workflows/alerting.yml` is
-> committed to the default branch and a run succeeds. Until then, treat this as
-> prepared monitoring, not live coverage. See [Activation](#activation).
+> **Status: active.** `.github/workflows/alerting.yml` is merged to the default
+> branch, registered, and active. It has completed **three scheduled runs
+> successfully**, all healthy, so no failed alert has been observed yet. The
+> workflow also supports manual `workflow_dispatch`. See
+> [Execution evidence](#execution-evidence).
 
 ## Overview
 
@@ -75,6 +76,18 @@ remain disabled.
 - Concurrency groups runs so a manual dispatch cannot overlap a scheduled run.
 - Runs `python -m app.core.alerting_runner` from the `backend` directory on
   Python 3.12 (the project supports 3.11–3.12). No dependencies are installed.
+
+## Execution evidence
+
+`FinPath production alerting` (workflow id `418855193`, state `active`) has completed three scheduled runs, all successful and healthy. **No failed alert has been observed yet**, so alert delivery and the investigation path are unexercised.
+
+| Run ID | Event | Conclusion | Date (UTC) |
+|---|---|---|---|
+| [`43710614668`](https://github.com/alicephoo/FinPath_Website/actions/runs/43710614668) | schedule | success | 2026-11-15T11:47:28Z |
+| [`43745912820`](https://github.com/alicephoo/FinPath_Website/actions/runs/43745912820) | schedule | success | 2026-11-15T18:17:27Z |
+| [`43773993903`](https://github.com/alicephoo/FinPath_Website/actions/runs/43773993903) | schedule | success | 2026-11-15T23:17:19Z |
+
+All three runs executed against the default branch. A successful run means the runner exited `0` (all required probes passed). No `workflow_dispatch` run has been executed. Each run's authentication probe makes one invalid-login request that produces a single expected `auth_login_failed` warning log entry in production; it does not create a session or write to the database.
 
 ## Exit codes and interpreting a failed run
 
@@ -158,19 +171,18 @@ and choose a scenario. See [ONCALL_RUNBOOK.md](ONCALL_RUNBOOK.md) for
 classification rules, the repair allowlist, artifacts, and security
 restrictions.
 
-## Activation
+## Activation status
 
-Scheduled monitoring is **not active** until all of the following hold:
+Scheduled monitoring is **active**:
 
-1. `.github/workflows/alerting.yml` is committed and merged to the default
-   branch (`main`). Scheduled workflows run from the default branch.
-2. GitHub Actions is enabled for the repository. For a private repository,
-   scheduled runs consume included Actions minutes.
-3. A manual `workflow_dispatch` run completes and is green, confirming the
-   probes, credentials-free auth smoke, and runner work in the Actions
-   environment.
-4. The owner confirms that failed-workflow notifications are received.
+1. `.github/workflows/alerting.yml` is merged to the default branch (`main`). ✅
+2. GitHub Actions is enabled for the repository. ✅
+3. Three scheduled runs have completed successfully, confirming the probes, the
+   credentials-free auth smoke, and the runner work in the Actions environment. ✅
+4. The owner must still confirm that failed-workflow notifications are received.
+   No failed alert has been observed, so this has not been verified end to end.
 
-After activation, GitHub may disable scheduled workflows after roughly 60 days
-of repository inactivity; a manual dispatch or new commit re-enables them.
-Schedules are best-effort and may be delayed under load.
+A manual `workflow_dispatch` run has not been executed; it remains the simplest
+deliberate way to exercise the workflow. GitHub may disable scheduled workflows
+after roughly 60 days of repository inactivity; a manual dispatch or new commit
+re-enables them. Schedules are best-effort and may be delayed under load.

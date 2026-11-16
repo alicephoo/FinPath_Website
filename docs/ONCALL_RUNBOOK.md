@@ -1,11 +1,12 @@
 # FinPath On-Call Runbook
 
-> **Status: implemented, not yet verified for automatic triggering.** The
-> deterministic agent and its manual simulation are tested locally. The native
-> `workflow_run` trigger is statically validated but has not been observed
-> because that would require a real failed production alerting run. It becomes
-> active only after the workflow is merged to the default branch and a failed
-> alerting run occurs. See [Verification status](#verification-status).
+> **Status: implemented; trigger observed, failure-gated diagnosis not yet
+> exercised.** The deterministic agent and its manual simulation are tested
+> locally. The native `workflow_run` trigger has fired **three times** (run IDs
+> `43710672840`, `43745980275`, `43774052244`), but every investigation job was
+> **skipped** because the corresponding alerting run succeeded. The
+> failure-gated diagnosis path and the manual `workflow_dispatch` path have not
+> run in GitHub Actions. See [Verification status](#verification-status).
 
 ## What this is
 
@@ -138,7 +139,9 @@ python -m app.core.oncall_agent simulate \
 
 Available scenarios: `frontend_marker_fixture`, `auth_origin_fixture`,
 `backend_ready_outage`, `unknown_failure`. Or use **Actions → FinPath on-call
-agent → Run workflow** and choose a scenario.
+agent → Run workflow** and choose a scenario; this GitHub Actions manual
+dispatch path has not been executed yet — the scenarios above have only been run
+through the local CLI.
 
 Diagnose a saved failed-run log:
 
@@ -169,9 +172,10 @@ python -m app.core.oncall_agent diagnose \
   allowlist; only isolated fixtures can be repaired in the demonstration.
 - **Log parsing is coupled to the runner's summary format.** If the runner's
   output changes, update the parser and tests together.
-- **Automatic triggering is not yet observed.** Static validation and manual
-  simulation pass; a native failure-triggered run is still required for full
-  verification.
+- **Failure-gated diagnosis is not yet observed.** The native `workflow_run`
+  trigger has fired three times, but each investigation was skipped because the
+  alerting run succeeded; a real failure-triggered run is still required for
+  full verification.
 - **Actions must be enabled** and the workflow must exist on the default branch
   for `workflow_run` to fire.
 - **The agent does not notify anyone.** It publishes an artifact and job
@@ -188,13 +192,25 @@ python -m app.core.oncall_agent diagnose \
 
 ## Verification status
 
-- **Verified manually:** `frontend_marker_fixture` and `auth_origin_fixture`
-  propose a patch, apply it to an ephemeral directory, and pass the focused
-  test. `backend_ready_outage` escalates without a patch. `diagnose` produces a
-  safe report from a sample failed-run log.
-- **Static validation only:** the workflow YAML, event name, permissions,
-  timeout, and step logic. The native `workflow_run` automatic trigger has not
-  been observed.
-- **Activation:** merge `.github/workflows/oncall-agent.yml` to the default
-  branch and confirm the first failure-triggered run. Do not claim automatic
-  triggering until then.
+- **Verified by local CLI simulation:** `frontend_marker_fixture` and
+  `auth_origin_fixture` propose a patch, apply it to an ephemeral directory, and
+  pass the focused test. `backend_ready_outage` escalates without a patch.
+  `diagnose` produces a safe report from a sample failed-run log.
+- **Trigger observed, investigation skipped:** the native `workflow_run` trigger
+  has fired three times, and each investigation job was skipped because the
+  triggering alerting run succeeded:
+
+  | Run ID | Event | Result | Date (UTC) |
+  |---|---|---|---|
+  | `43710672840` | workflow_run | skipped | 2026-11-15T11:48:12Z |
+  | `43745980275` | workflow_run | skipped | 2026-11-15T18:18:12Z |
+  | `43774052244` | workflow_run | skipped | 2026-11-15T23:17:59Z |
+
+- **Not yet exercised in GitHub Actions:** the failure-gated diagnosis path
+  (`gh run view --log` → `oncall_agent diagnose`) and the manual
+  `workflow_dispatch` simulation path. Both have only been exercised through the
+  local CLI. Do not claim that the diagnosis path has run successfully in GitHub
+  Actions.
+- **Remaining to verify:** run a manual `workflow_dispatch` scenario, or observe
+  a genuine failed alerting run, to exercise the investigation end to end. Do
+  not create an artificial production failure to force this.

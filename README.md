@@ -86,7 +86,7 @@ FinPath/
 │   └── Dockerfile           # Nginx image for local Compose
 ├── docker/postgres/         # Local role/init script
 ├── .github/workflows/ci.yml # CI: backend, frontend, E2E, Docker build, and staging-lite jobs
-├── .github/workflows/alerting.yml # Hourly production probes (manual dispatch; merged, no successful run observed yet)
+├── .github/workflows/alerting.yml # Hourly production probes (active; three scheduled runs passed)
 ├── .github/workflows/oncall-agent.yml # Read-only on-call diagnosis after a failed alerting run
 ├── compose.yaml             # Local full-stack Docker Compose
 ├── PROJECT_SPEC.md          # Product specification (source of truth for behavior)
@@ -95,6 +95,25 @@ FinPath/
 ├── docs/ALERTING_RUNBOOK.md # Alerting probes, severities, and investigation steps
 └── docs/ONCALL_RUNBOOK.md   # On-call classification, fixture repairs, verification, and limitations
 ```
+
+## Agent Team and Collaboration
+
+Development follows the six-role team defined in [AGENTS.md](AGENTS.md). Roles, review rules, and approval gates apply even when one agent wears several hats; this is a documented collaboration process, not automated orchestration.
+
+| Role | Responsibility | Reviewer |
+|---|---|---|
+| Coordinator / Orchestrator | Owns task intake, scope, sequencing, delegation, conflict resolution, and approval gates | Human owner |
+| Frontend Engineer | Implements the React/TypeScript/Vite/Tailwind UI and its tests | QA; Security when auth, CSRF, cookies, or the proxy are touched |
+| Backend Engineer | Implements FastAPI routes, services, models, migrations, and their tests | QA; Security when auth, ownership, money math, or migrations are touched |
+| QA & Testing Engineer | Independently verifies behavior and prevents regressions | Coordinator |
+| Security & Reliability Reviewer | Guards authentication, ownership, financial integrity, secrets, and production safety | Human owner |
+| Documentation & Context Manager | Keeps repository context accurate, current, and non-duplicative | Coordinator |
+
+Work flows from the Coordinator to the engineers, then to QA, then to the Security & Reliability Reviewer for high-risk changes, then to the Documentation & Context Manager, and finally back to the Coordinator and the human owner for commit or deployment approval. Handoffs use a fixed template, and explicit human approval is required before commits, pushes, deployments, migrations, destructive actions, dependency changes, or CI-permission changes.
+
+## Context Management
+
+Context is managed through a single authoritative chain rather than duplicated notes. [AGENTS.md](AGENTS.md) defines the documentation precedence order, a context-refresh rule (re-read the relevant authority document and inspect Git status before editing), a handoff template, a documentation-update matrix, the verified command table, and a required completion report. [PROJECT_SPEC.md](PROJECT_SPEC.md) is authoritative for product behavior; `API_CONTRACTS.md` and `BACKEND_ARCHITECTURE.md` cover contracts and schema; the READMEs cover setup; and [PROGRESS.md](PROGRESS.md) records current status and dated evidence. [TASKS.md](TASKS.md) is retained as a historical checklist only and is not authoritative for current behavior.
 
 ## Prerequisites
 
@@ -267,7 +286,7 @@ source .venv/bin/activate
 pytest tests/test_oncall_agent.py -q
 ```
 
-These tests cover failure classification, malformed and conflicting alert summaries, the repair allowlist, fixture-only patch generation, and verification gating. The focused local suite reports **95 passed and 2 skipped**; CI run `43696552654` for commit `9719671` passed all five jobs (backend: **543 passed, 2 skipped**). The two skipped tests are simulation-only and are exercised by the local CLI simulation.
+These tests cover failure classification, malformed and conflicting alert summaries, the repair allowlist, fixture-only patch generation, and verification gating. The focused local suite reports **95 passed and 2 skipped**; the latest CI run `43782171763` (commit `a9933a4`) passed all five jobs (backend: **543 passed, 2 skipped**). The two skipped tests are simulation-only and are exercised by the local CLI simulation.
 
 ### End-to-end tests
 
@@ -281,7 +300,17 @@ Playwright starts the backend against the dedicated test database via `frontend/
 
 ### Verified CI test counts
 
-From GitHub Actions run `43174534132` on **2026-11-12** at commit `45527fffe2fa36e4a0c90dd4f9592aff188be1bf`:
+**Latest run — GitHub Actions run [`43782171763`](https://github.com/alicephoo/FinPath_Website/actions/runs/43782171763), 2026-11-16, commit `a9933a47e82996c1bd51c240be82058d1ee7f813`** (all five jobs passed):
+
+| Job | Result |
+|---|---|
+| Backend tests | 543 passed, 2 skipped |
+| Frontend tests, type check, and build | 330 tests passed across 19 files; type check and build succeeded |
+| Playwright E2E (Chromium) | passed |
+| Docker image builds | passed |
+| Backend container staging-lite | passed |
+
+**Earlier snapshot — GitHub Actions run `43174534132`, 2026-11-12, commit `45527fffe2fa36e4a0c90dd4f9592aff188be1bf`:**
 
 | Suite | Result |
 |---|---|
@@ -289,7 +318,7 @@ From GitHub Actions run `43174534132` on **2026-11-12** at commit `45527fffe2fa3
 | Frontend (Vitest, 19 files) | 316 passed; type check and build succeeded |
 | End-to-end (Playwright, Chromium) | 10 passed in 31.4 s across 5 spec files |
 
-These counts are a snapshot of that run and may change as the project evolves.
+These counts are snapshots of those runs and may change as the project evolves.
 
 ## Deployment Overview
 
@@ -308,7 +337,7 @@ Operational notes:
 - The Pages proxy preserves method, path, query, body, auth/CSRF/idempotency headers, and multiple `Set-Cookie` headers; it never accepts an upstream from the request.
 - Render uses `/health` as its health-check path; `/ready` reports database readiness. Startup migrations are disabled with `FINPATH_RUN_STARTUP_MIGRATIONS=false`.
 - Migrations are applied separately with `FINPATH_MIGRATION_DATABASE_URL` as `finpath_migrator` against a direct Neon connection.
-- GitHub Actions builds and tests through `ci.yml`, hosts the separate hourly alerting workflow and the read-only on-call diagnosis workflow; none of these workflows deploys. Neither the alerting nor the on-call workflow has executed yet.
+- GitHub Actions builds and tests through `ci.yml`, hosts the separate hourly alerting workflow and the read-only on-call diagnosis workflow; none of these workflows deploys. The alerting workflow is active and has completed three scheduled runs successfully; the on-call workflow's native `workflow_run` trigger has fired, but its failure-gated investigation has not run.
 
 ## Observability
 
@@ -320,7 +349,7 @@ FinPath correlates and describes its own runtime behavior without external monit
 
 The metrics endpoint (`/metrics`) is **disabled by default** and is protected by an optional bearer token; when enabled without a valid token it fails closed. No metrics are currently collected in production, and there is no monitoring dashboard or tracing platform. Metrics are held in process, so counters reset when the backend restarts and are not shared across instances.
 
-**User-impact alerting.** Four synthetic probes (`frontend`, `backend_health`, `backend_ready`, `auth_smoke`) are configured to check the production deployment hourly, and a failed workflow run is the alert. The evaluator, standard-library runner, and GitHub Actions workflow are implemented in the repository, but scheduled alerting is **not yet verified active**: the workflow is merged and registered, but no scheduled or manual run has executed yet. See [docs/ALERTING_RUNBOOK.md](docs/ALERTING_RUNBOOK.md) for probes, severities, retries, exit codes, and safe investigation steps.
+**User-impact alerting.** Four synthetic probes (`frontend`, `backend_health`, `backend_ready`, `auth_smoke`) check the production deployment hourly, and a failed workflow run is the alert. The workflow (`FinPath production alerting`, id `418855193`) is **active** and has completed **three scheduled runs successfully** (run IDs `43710614668`, `43745912820`, `43773993903`); all three runs were healthy, so no actual failed alert has been demonstrated yet. See [docs/ALERTING_RUNBOOK.md](docs/ALERTING_RUNBOOK.md) for probes, severities, retries, exit codes, and safe investigation steps.
 
 A separate deterministic on-call agent can read a failed alerting run's safe summary and publish a diagnosis; it never changes production code or deploys. See [On-Call Agent](#on-call-agent) and [docs/ONCALL_RUNBOOK.md](docs/ONCALL_RUNBOOK.md).
 
@@ -330,8 +359,8 @@ FinPath includes a **deterministic, rule-based on-call diagnosis agent** for fai
 
 **Relationship to production alerting**
 
-- The hourly `alerting` workflow is configured to run four synthetic production probes; a failed run is the alert. No scheduled or manual alerting run has executed yet.
-- The separate `.github/workflows/oncall-agent.yml` workflow is configured to start on a failed alerting run (`workflow_run`) and can also be started manually with `workflow_dispatch`.
+- The hourly `alerting` workflow runs four synthetic production probes; a failed run is the alert. It is active and has completed three scheduled runs successfully, so no failed alert has been observed yet.
+- The separate `.github/workflows/oncall-agent.yml` workflow starts on alerting-run completion (`workflow_run`) but runs its investigation only when that run failed; it can also be started manually with `workflow_dispatch`. Its `workflow_run` trigger has fired three times, and every investigation was skipped because the alerting run succeeded.
 - The on-call workflow is read-only (`contents: read`, `actions: read`), uses no secrets, and never creates Issues, comments, branches, pull requests, commits, or deployments.
 
 ```text
@@ -356,11 +385,32 @@ alerting workflow (hourly or manual)
 
 **Verification status**
 
-- **Verified by local CLI simulation:** the frontend-marker and auth-origin fixtures produce a patch, apply it to an ephemeral directory, and pass the focused test; the readiness-outage scenario escalates without a patch; a sample failed-run log produces a safe diagnosis. The GitHub Actions on-call workflow has not been run, so its manual `workflow_dispatch` path is not yet exercised.
-- **Not yet verified:** the native automatic `workflow_run` trigger. The workflow is committed on the default branch and statically validated, but neither a native failure-triggered run nor a manual `workflow_dispatch` run has been executed, so do not treat automatic diagnosis as live yet.
-- The implementation is committed at [`9719671`](https://github.com/alicephoo/FinPath_Website/commit/9719671). CI run [`43696552654`](https://github.com/alicephoo/FinPath_Website/actions/runs/43696552654) passed all five jobs for that commit (backend: **543 passed, 2 skipped**). The focused local on-call suite reports **95 passed and 2 skipped**, and the local alerting suites report **90 passed**; the two simulation-only skips are exercised by the local CLI simulation.
+- **Verified by local CLI simulation:** the frontend-marker and auth-origin fixtures produce a patch, apply it to an ephemeral directory, and pass the focused test; the readiness-outage scenario escalates without a patch; a sample failed-run log produces a safe diagnosis.
+- **Trigger observed, investigation not yet exercised in Actions:** the native `workflow_run` trigger has fired three times (run IDs `43710672840`, `43745980275`, `43774052244`), but every investigation job was **skipped** because the corresponding alerting run succeeded. The failure-gated diagnosis path and the manual `workflow_dispatch` path have not run in GitHub Actions, so do not treat automatic diagnosis as live yet.
+- The implementation is committed at [`9719671`](https://github.com/alicephoo/FinPath_Website/commit/9719671). The latest CI run [`43782171763`](https://github.com/alicephoo/FinPath_Website/actions/runs/43782171763) (commit `a9933a4`, 2026-11-16) passed all five jobs (backend: **543 passed, 2 skipped**); the earlier run [`43696552654`](https://github.com/alicephoo/FinPath_Website/actions/runs/43696552654) for commit `9719671` was also green. The focused local on-call suite reports **95 passed and 2 skipped**, and the local alerting suites report **90 passed**; the two simulation-only skips are exercised by the local CLI simulation.
 
 See [docs/ONCALL_RUNBOOK.md](docs/ONCALL_RUNBOOK.md) for the classification table, repair allowlist, artifacts, security restrictions, and local CLI simulation commands.
+
+## AI Dev Tools Zoomcamp Evaluation Criteria
+
+This section maps the submission to the 12 AI Dev Tools Zoomcamp evaluation criteria. **Complete** means the artifact and its supporting evidence exist; **Partial** means meaningful evidence exists but a rubric-relevant gap remains. Untested behavior is not counted as complete. The full per-criterion assessment and remaining work are in [PROGRESS.md](PROGRESS.md).
+
+| # | Criterion | Status | Evidence | Remaining gap |
+|---|---|---|---|---|
+| 1 | Problem Description | Complete | [The Problem](#the-problem) and [Key Features](#key-features) describe the problem, product functionality, and expected behavior; `PROJECT_SPEC.md` §1 adds personas and goals | Keep aligned with product changes |
+| 2 | Product Specification | Partial | `PROJECT_SPEC.md` is a multi-section specification with acceptance criteria (`AC-1`–`AC-16`); the public [FinPath — Development Tracker](https://github.com/users/alicephoo/projects/1) holds draft tasks with context, scope, acceptance criteria, and agent roles | A real implementation task has not been tracked through a verified Todo → In Progress → Done trail on the board; track one task to upgrade |
+| 3 | Agent Team Specification | Complete | [AGENTS.md](AGENTS.md) defines six roles with responsibilities, boundaries, invocation triggers, and reviewers, plus delegation, handoff, and conflict procedures; `AI_WORKFLOW.md` links the task loop to the team | Score depends on `AGENTS.md` being included in the submitted repository |
+| 4 | Context Management | Complete | [AGENTS.md](AGENTS.md) defines precedence, context refresh, a handoff template, an update matrix, verified commands, and a completion report; `PROGRESS.md` records status and dated evidence | Score depends on the referenced documents being included and on grader assessment |
+| 5 | Application | Complete | Five-tab full-stack React + FastAPI + PostgreSQL application with implemented auth and financial APIs; live Pages and Render URLs | None for the documented scope |
+| 6 | Testing | Complete | Unit, component, integration, and Playwright E2E suites with documented commands; latest CI run `43782171763` passed all five jobs (backend 543 passed / 2 skipped; frontend 330 passed across 19 files) | Optional hardening only (browser matrix, load tests) |
+| 7 | Containerization | Complete | `backend/Dockerfile`, `frontend/Dockerfile`, and `compose.yaml`; one-command `docker compose up --build` runs the full stack | None required |
+| 8 | Deployment | Complete | Live at <https://finpath-website.pages.dev> and <https://finpath-website.onrender.com>; `/health` and `/ready` verified | Neon was not directly probed |
+| 9 | CI/CD | Partial | Five-job CI runs on push and pull request and the latest run passed; no automatic deployment pipeline exists | No CD automation; deployment is provider-driven/manual |
+| 10 | Observability | Partial | Structured JSON logs with `X-Request-ID` correlation, allowlisted domain events, and an in-process Prometheus-format metrics registry with a protected `/metrics` endpoint | Metrics are disabled in production; no tracing, dashboard, log aggregation/retention, or documented SLO |
+| 11 | Alerting | Partial | The hourly `FinPath production alerting` workflow is active and three scheduled runs (`43710614668`, `43745912820`, `43773993903`) passed against production | No actual failed alert run has been demonstrated; alert delivery and investigation are unexercised |
+| 12 | On-Call Agent | Partial | A deterministic Tier 1 agent, bounded fixture-only repairs, focused tests, and local CLI simulations exist; the native `workflow_run` trigger fired three times | Every investigation was skipped because alerting succeeded; manual Actions dispatch and real failure diagnosis remain unverified |
+
+**Scoring.** Following the mapping above, **7 criteria are Complete (14 confirmed points)** and **5 are Partial (up to 10 potential points)**, with **0 Missing**. The potential ceiling is **24/24** only if every partial criterion receives full credit; that is a ceiling, not an awarded score, and partial credit may be lower. The project does not claim 24/24. See [PROGRESS.md](PROGRESS.md) for the full rubric table and per-criterion remaining work.
 
 ## Security and Data Handling
 
@@ -393,7 +443,7 @@ Financial data is stored in PostgreSQL and survives refreshes, restarts, and sig
 - **CSV is the only export format.**
 - **Playwright runs Chromium only.**
 - **Render free-tier cold starts** can delay the first request.
-- **On-call automatic triggering is unverified** — the `workflow_run` workflow is configured and statically validated, but neither a native failure-triggered run nor a manual `workflow_dispatch` run has executed. Local CLI simulations are verified.
+- **On-call failure diagnosis is unverified in GitHub Actions** — the native `workflow_run` trigger has fired three times, but every investigation was skipped because the alerting run succeeded, and no manual `workflow_dispatch` run has executed. Local CLI simulations are verified.
 - **On-call repairs are fixture-only** — the agent never modifies production application code; production failures are diagnosed and escalated for human remediation.
 - **The on-call agent is deterministic, not an LLM** — novel failures are classified as unknown and escalated, and there is no on-call rotation or autonomous remediation.
 
@@ -416,6 +466,19 @@ Active development tasks are tracked on the public [FinPath — Development Trac
 | [docs/ONCALL_RUNBOOK.md](docs/ONCALL_RUNBOOK.md) | Deterministic on-call classification, fixture-only repairs, verification, security, and limitations |
 | [TASKS.md](TASKS.md) | Historical ordered task checklist |
 | [PROGRESS.md](PROGRESS.md) | Current progress, dated evidence, and rubric status; `PROJECT_SPEC.md` is authoritative for current behavior |
+
+## Project Links
+
+| Link | Description |
+|---|---|
+| [Repository](https://github.com/alicephoo/FinPath_Website) | Source code |
+| [FinPath — Development Tracker](https://github.com/users/alicephoo/projects/1) | Public GitHub Projects v2 board for active tasks |
+| [Frontend](https://finpath-website.pages.dev) | Deployed React application |
+| [Backend](https://finpath-website.onrender.com) | Deployed FastAPI service |
+| [CI run `43782171763`](https://github.com/alicephoo/FinPath_Website/actions/runs/43782171763) | Latest CI run (2026-11-16, commit `a9933a4`); all five jobs green |
+| [CI run `43696552654`](https://github.com/alicephoo/FinPath_Website/actions/runs/43696552654) | CI run for the on-call commit `9719671` |
+| [Alerting workflow](https://github.com/alicephoo/FinPath_Website/actions/workflows/alerting.yml) | `FinPath production alerting` — active; three scheduled runs passed |
+| [On-call workflow](https://github.com/alicephoo/FinPath_Website/actions/workflows/oncall-agent.yml) | `FinPath on-call agent` — read-only; trigger observed, investigation not yet exercised |
 
 ## License
 
