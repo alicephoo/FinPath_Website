@@ -391,6 +391,7 @@ alerting workflow (hourly or manual)
 
 See [docs/ONCALL_RUNBOOK.md](docs/ONCALL_RUNBOOK.md) for the classification table, repair allowlist, artifacts, security restrictions, and local CLI simulation commands.
 
+
 ## AI Dev Tools Zoomcamp Evaluation Criteria
 
 This section maps the submission to the 12 AI Dev Tools Zoomcamp evaluation criteria. **Complete** means the artifact and its supporting evidence exist; **Partial** means meaningful evidence exists but a rubric-relevant gap remains. Untested behavior is not counted as complete. The full per-criterion assessment and remaining work are in [PROGRESS.md](PROGRESS.md).
@@ -446,6 +447,12 @@ Financial data is stored in PostgreSQL and survives refreshes, restarts, and sig
 - **On-call failure diagnosis is unverified in GitHub Actions** — the native `workflow_run` trigger has fired three times, but every investigation was skipped because the alerting run succeeded, and no manual `workflow_dispatch` run has executed. Local CLI simulations are verified.
 - **On-call repairs are fixture-only** — the agent never modifies production application code; production failures are diagnosed and escalated for human remediation.
 - **The on-call agent is deterministic, not an LLM** — novel failures are classified as unknown and escalated, and there is no on-call rotation or autonomous remediation.
+
+## Known Limitations
+
+- **Free-tier cold starts:** The Render backend may sleep after 15 minutes of inactivity, while Neon PostgreSQL may scale to zero after 5 minutes. The first request after inactivity may take longer than usual or experience a temporary failure.
+- **Session restoration:** Users may experience a temporary issue when restoring an existing session after backend inactivity. Retrying or refreshing the page may help.
+- **Service availability:** The application uses free-tier hosting services, so response times and availability may vary.
 
 ## Task Tracking
 
